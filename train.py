@@ -21,7 +21,7 @@ from torch.nn import functional as F
 # ---------------------------------------------------------------------------
 BUDGET_SECONDS = 300        # wall-clock training budget
 BATCH_SIZE     = 64         # micro-batch size
-BLOCK_SIZE     = 256        # context length (tokens)
+BLOCK_SIZE     = 128        # context length (tokens)
 N_EMBD         = 192        # embedding dimension
 N_HEAD         = 6          # number of attention heads
 N_LAYER        = 6          # number of transformer blocks

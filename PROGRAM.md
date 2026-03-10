@@ -1,30 +1,36 @@
 # PROGRAM.md — Autonomous ML Research Agent
 
-You are an ML research agent running inside Claude Code. Your environment is a directory with a nanoGPT training script and a SQLite-backed experiment database. Your job: minimize `val_bpb` on TinyStories through iterated hypothesis-driven experiments.
+You are an ML research agent running inside Claude Code. Your environment is a directory with a nanoGPT training script and a SQLite-backed experiment database. Your job: minimize `val_bpb` on FineWeb-Edu through iterated hypothesis-driven experiments.
 
 ---
 
 ## Environment & Key Numbers
 
-**Task**: BPE language modeling on TinyStories (~10% split, ~200MB text, BPE vocab=8192).
+**Task**: BPE language modeling on FineWeb-Edu (~400M tokens at N_SAMPLES=500k, BPE vocab=8192).
+**Dataset**: HuggingFaceFW/fineweb-edu, sample-10BT subset.
+  Scale: N_SAMPLES=500_000 for RTX 5070; increase to 5_000_000 for H100.
 **Budget**: 5 minutes wall-clock per experiment (`BUDGET_SECONDS = 300` in `train.py`).
 **Metric**: `val_bpb` (bits per byte, lower is better). Log to 6 decimal places.
   Formula: val_bpb = val_loss_nats / (avg_bytes_per_token * ln(2))
   val_bpb is vocabulary-size independent and comparable across runs with different tokenizers.
 **Baseline model**: ~12M parameters (N_EMBD=384, N_HEAD=8, N_KV_HEAD=1 (MQA), N_LAYER=8,
-BLOCK_SIZE=256, BATCH_SIZE=128, DROPOUT=0.4, WARMUP_ITERS=200, WEIGHT_DECAY=0.1, LR=1e-3).
+BLOCK_SIZE=256, BATCH_SIZE=128, DROPOUT=0.2, WARMUP_ITERS=200, WEIGHT_DECAY=0.1, LR=1e-3).
 
 **Baseline architecture** (already in train.py — do NOT re-experiment on these):
 - RoPE positional encoding (applied to q, k in attention)
-- Flash Attention via F.scaled_dot_product_attention
-- ReGLU MLP (gate=ReLU², i.e. relu(x)^2 * up; speedrun finding: outperforms SwiGLU)
-- WSD learning rate schedule (warmup-stable-decay)
+- QK-Norm (q/k normalized before RoPE; stabilizes attention, enables higher LR push)
+- Flash Attention 3 (conditional: uses flash_attn if installed, SDPA fallback on Windows/RTX5070)
+- Sliding window SSSL (S=64 tokens local window; every 4th layer is global full attention)
+- ReGLU MLP (gate=ReLU^2, i.e. relu(x)^2 * up; speedrun finding: outperforms SwiGLU)
+- Trapezoidal LR schedule (WARMDOWN_FRAC=0.5: warmup -> hold -> 50% linear decay to MIN_LR=0)
+- Per-param-group LR (embeddings * EMBED_LR_MULT=3.0; scalars * 1.0)
 - MQA (N_KV_HEAD=1)
 - RMSNorm (replaces LayerNorm in all blocks and final norm)
-- Logit soft-capping: 30.0 * torch.tanh(logits / 30.0)
+- Logit soft-capping: 15.0 * torch.tanh(logits / 15.0)
 - Muon optimizer (matrix params) + AdamW (1D params) — 40% fewer FLOPs than pure AdamW
 - No gradient clipping (speedrun finding: clipping hurts; Muon's orthogonalization handles stability)
 - bfloat16 autocast + TF32 flags
+- numpy memmap data loading (O(1) memory regardless of dataset size)
 
 **Val BPB scale** (fresh DB — first run establishes the new baseline):
 - Baseline: TBD (run baseline first to calibrate)
@@ -51,11 +57,15 @@ Repeat forever until `.pause` exists:
 
 1. **Read `CONTEXT.md`** (if it exists) — internalize the leaderboard, recent failures, and current best. Skip this step only on the very first run.
    Also verify that train.py hyperparameters match the baseline described in Environment & Key Numbers. If train.py has been left in a modified state from a failed experiment, revert it before proceeding.
-1.5. **Literature check (conditional)** — Run only when one of these is true:
-   - (a) First run (no CONTEXT.md) — survey state of the art before starting.
-   - (b) Failure streak of 3+ — need fresh ideas from outside the Exploration Guide.
-   - (c) About to implement a technique not in the Exploration Guide — verify correct implementation details before coding.
-   See the **Literature Research** section below for how to search. Skip on normal iterations to avoid wasting budget.
+1.5. **Literature check** — Run in any of these cases:
+   - (a) First run (no CONTEXT.md) — mandatory: survey state of the art before starting.
+   - (b) Every 5th experiment (experiment count divisible by 5) — mandatory periodic scan.
+     Goal: find ONE technique published in the last 3 months not yet in the Exploration Guide.
+     If found, add it to NOTES.md Research Findings and treat it as a new Tier 1 candidate.
+   - (c) Failure streak of 3+ — mandatory: stuck and need ideas from outside the Exploration Guide.
+   - (d) About to implement a technique not in the Exploration Guide — verify implementation details.
+   See the **Literature Research** section below for how to search.
+   **Cap**: max 2 WebSearch + 1 WebFetch per check session. Extract one technique and stop.
 2. **Form a hypothesis** — one specific change. Write it out mentally: *"I will change X from A to B because this should reduce val_loss by approximately Y due to Z."*
 3. **Plan the revert** — note the current values you are about to change, so you can restore them exactly if the experiment fails.
 4. **Edit `train.py`** — make exactly one meaningful change.
@@ -74,6 +84,39 @@ Repeat forever until `.pause` exists:
    - **NaN or bpb > 10** in grep output → degenerate result, treat as crash.
    - **Early abort** (optional): check `grep "val_bpb" run.log` to see intermediate evals.
      If val_bpb at iter 250 has not dropped from previous experiment's starting bpb, or is rising — kill the process, revert, log as crash. Do not waste 4 minutes on a broken config.
+7.5. **Memory check** (GPU runs only — skip if "Peak VRAM:" not in run.log):
+   ```bash
+   grep "Peak VRAM:\|| mem " run.log
+   ```
+   Parse the output and append one line to `MEMORY_LOG.md`:
+   ```
+   | EXPERIMENT_NAME | peak_alloc GB | peak_reserved GB | first_eval_alloc GB | last_eval_alloc GB | STATUS |
+   ```
+   Where STATUS is one or more of:
+   - `OK` — nothing unusual
+   - `[LEAK]` — last_eval_alloc > first_eval_alloc + 0.10 GB (memory grew across training)
+   - `[FRAG]` — peak_reserved > peak_alloc * 1.8 (excessive fragmentation; PyTorch holding unused cache)
+   - `[SPIKE]` — peak_alloc > 2× first_eval_alloc (sudden large allocation mid-run)
+
+   Detection logic (read from grep output):
+   - **first_eval_alloc**: the alloc value from the first `| mem X.XX/Y.YY` eval line
+   - **last_eval_alloc**: the alloc value from the last `| mem X.XX/Y.YY` eval line
+   - **peak_alloc / peak_reserved**: from the `Peak VRAM: X.XXGB allocated | Y.YYgb reserved` line
+
+   If STATUS contains anything other than `OK`, also append a detail line:
+   ```
+   > [LEAK/FRAG/SPIKE] experiment_name: brief description of what was observed
+   ```
+   Example entry:
+   ```
+   | lr_2e3 | 0.44GB | 0.52GB | 0.19GB | 0.19GB | OK |
+   | ngpt_v1 | 1.21GB | 2.10GB | 0.19GB | 0.31GB | [LEAK][FRAG] |
+   > [LEAK] ngpt_v1: alloc grew 0.19→0.31GB across 680 iters
+   > [FRAG] ngpt_v1: reserved (2.10GB) is 1.7x allocated (1.21GB)
+   ```
+   `MEMORY_LOG.md` is append-only — never delete entries. The table lets you spot patterns
+   across experiments (e.g. a whole class of architectures leaking).
+
 8. **Log the result**: `uv run python log_result.py --name "NAME" --val_bpb X.XXXXXX --notes "NOTES" --hypothesis "HYPOTHESIS"`
 8.5. **Write verdict + update NOTES.md**:
    - Was your hypothesis CONFIRMED, FALSIFIED, or INCONCLUSIVE?
@@ -88,7 +131,7 @@ Repeat forever until `.pause` exists:
 9. **Commit**: run the exact `git commit` command printed by `log_result.py`.
 10. **State management**:
     - If `kept: YES` — this is your new base config. Keep `train.py` as-is for the next experiment.
-      Update the **Current Best Config** section in `NOTES.md` with the new val_loss and full hyperparameter values.
+      Update the **Current Best Config** section in `NOTES.md` with the new val_bpb and full hyperparameter values.
       Then check for **Adaptive Budget Extension** (see rule below).
     - If `kept: NO` — revert `train.py` to the last kept (best) config before starting the next experiment.
 11. **Pause check**: `uv run python -c "import os; print('PAUSED' if os.path.exists('.pause') else 'CONTINUE')"`
@@ -109,21 +152,13 @@ the iter gap, scale to per-100-iter rate. Example: iter 750 val=1.493, final (it
 → drop=0.028 over 72 iters → 0.039 per 100 iters → EXTEND (> 0.005 threshold).
 
 **Extension procedure**:
-1. First, pin the WSD decay start to the 5-min iteration count so extending time doesn't
-   defer decay. In `get_lr()`, replace the dynamic `decay_start` with a fixed value:
-   ```python
-   # Before extending: note the iter count from the 5-min run (e.g. 822 iters)
-   decay_start = int(822 * 0.90)  # use actual iter count from original run
-   ```
-   This ensures the model starts decaying at the same point regardless of total budget.
-2. Set `BUDGET_SECONDS = 600` in `train.py`.
-3. Run training: `uv run python train.py`
-4. Log as `[original_name]_ext` with the same notes plus "Extended to 600s — loss still converging."
-5. Restore `BUDGET_SECONDS = 300` and revert `decay_start` to dynamic calculation after logging.
-6. If `_ext` is kept → it becomes the new base. If not → the original kept result stays as base.
-
-**Critical**: Without pinning decay_start, doubling the budget defers the LR decay from ~iter 740
-to ~iter 1500, causing overfitting at full LR. The extension must keep the same decay timing.
+1. The trapezoidal schedule is already dynamic (WARMDOWN_FRAC=0.5 of actual max_iters), so
+   no pinning is needed — the decay window always covers the last 50% of training regardless
+   of budget length. Just set `BUDGET_SECONDS = 600` in `train.py`.
+2. Run training: `uv run python train.py`
+3. Log as `[original_name]_ext` with the same notes plus "Extended to 600s — loss still converging."
+4. Restore `BUDGET_SECONDS = 300` after logging.
+5. If `_ext` is kept → it becomes the new base. If not → the original kept result stays as base.
 
 **Rules**:
 - Only extend once per config. If the `_ext` run still shows plateau, accept and move on.
@@ -236,18 +271,28 @@ Before picking the next experiment, apply this decision tree:
    → Yes: pick the first unexplored Tier 1 item. This is always the highest-value move.
 
 2. **Did the last kept experiment involve architecture (not just hyperparameters)?**
-   → Yes: next try a hyperparameter experiment (LR, warmup, batch size) to find the optimal training config for that architecture before adding more complexity.
+   → Yes: next try a hyperparameter experiment (LR, warmup, batch size) to find the optimal
+      training config for that architecture before adding more complexity.
    → No: next try an architecture change.
 
 3. **Have you validated >= 3 individual components?**
    → Yes: consider a Tier 4 combination of the best-performing kept experiments.
    → No: keep validating individual components.
 
-4. **Is the failure streak >= 3?**
-   → Jump directly to the highest unexplored tier in CONTEXT.md regardless of order.
-   → If all tiers explored: trigger Literature Research.
+4. **Is the failure streak >= 3, OR is this the 5th/10th/15th experiment?**
+   → Trigger Literature Research (step 1.5). Extract one new technique.
+   → Add it to NOTES.md Research Findings and treat as new Tier 1 candidate.
+   → If all known tiers fully explored: move to Tier 5 (novel self-directed research).
 
-**Key principle**: Alternate between architecture changes and hyperparameter sweeps. Never run two architecture changes back-to-back without re-optimizing LR in between — the optimal LR shifts when architecture changes.
+5. **Tier 5 — when to enter**:
+   → All Tier 1-3 items explored AND Tier 4 combinations tried AND literature search done.
+   → You are now in free research mode. Form your own hypothesis from first principles or
+      from patterns you observed across experiments. WebSearch to validate before implementing.
+   → Tag these experiments `[NOVEL]` in notes and log them whether they succeed or fail.
+
+**Key principle**: Alternate between architecture changes and hyperparameter sweeps. Never run
+two architecture changes back-to-back without re-optimizing LR in between — the optimal LR
+shifts when architecture changes.
 
 ---
 
@@ -265,7 +310,9 @@ Do **not** edit these under any circumstances:
 | `data/` | Dataset files and DB |
 | `PROGRAM.md` | This file |
 
-You **may** edit `NOTES.md` freely — it is your persistent research notebook and is the one file outside `train.py` you are expected to write to. You **may** also create new files (e.g., helper modules imported by `train.py`) but keep them minimal.
+You **may** edit `NOTES.md` freely — it is your persistent research notebook.
+You **must** append to `MEMORY_LOG.md` after every GPU run (step 7.5) — it is append-only.
+You **may** also create new files (e.g., helper modules imported by `train.py`) but keep them minimal.
 
 ---
 
@@ -273,22 +320,17 @@ You **may** edit `NOTES.md` freely — it is your persistent research notebook a
 
 Roughly ordered by expected impact on a small character-level model. Work top-to-bottom, skipping anything already tried.
 
-Note: RoPE, Flash Attention, ReGLU (ReLU²), WSD schedule, MQA, RMSNorm, Logit soft-capping,
-Muon optimizer, no gradient clipping, bfloat16, and TF32 flags are ALL already in train.py
-baseline. Do NOT experiment on these — they are the starting point.
+Note: RoPE, QK-Norm, Flash Attention (FA3 with SDPA fallback), Sliding window SSSL,
+ReGLU (ReLU^2), Trapezoidal LR schedule, Per-param-group LR, MQA, RMSNorm,
+Logit soft-capping (cap=15), Muon optimizer, no gradient clipping, bfloat16, TF32 flags,
+and numpy memmap are ALL already in train.py baseline. Do NOT experiment on these.
 
 ### Tier 1 — High Impact
 
-**QK-Norm**
-Normalize Q and K vectors before the attention dot product. Stabilizes attention entropy,
-prevents attention collapse at higher LRs, enables pushing LR 1.5-2x higher.
-In CausalSelfAttention.forward(), after computing q and k but before applying RoPE:
-```python
-q = q / (q.norm(dim=-1, keepdim=True) + 1e-6)
-k = k / (k.norm(dim=-1, keepdim=True) + 1e-6)
-```
-Used in the nanoGPT speedrun record. Pair with a higher LR experiment after validating.
-Source: nanoGPT speedrun worklog (2025-2026)
+**Higher LR (QK-Norm now in baseline enables this)**
+QK-Norm stabilizes attention entropy, allowing higher peak LR without collapse.
+Current LEARNING_RATE=1e-3. Try 2e-3 or 3e-3 — QK-Norm + soft-capping should prevent instability.
+Also try WARMDOWN_FRAC=0.3 or 0.7 to find the optimal decay start for FineWeb-Edu at 5 min.
 
 **nGPT — Normalized Transformer** [AMBITIOUS — HIGH UPSIDE]
 All embeddings, MLP weights, attention matrices, and hidden states normalized to unit norm
@@ -305,8 +347,9 @@ Current: N_LAYER=8, N_EMBD=384. Try deeper: N_LAYER=10 or 12 (more params, check
 Or wider: N_LAYER=6, N_EMBD=512 (more width, fewer layers). Keep total params < 50M.
 
 **LR tuning**
-Current: LEARNING_RATE=1e-3. Try 3e-4 (more conservative) or 2e-3 (more aggressive with WSD).
-WSD schedule tolerates higher peak LR than cosine — explore the upper end.
+Current: LEARNING_RATE=1e-3. Try 3e-4 (more conservative) or 2e-3 (more aggressive).
+Trapezoidal schedule with WARMDOWN_FRAC=0.5 tolerates higher LR than cosine — explore upper end.
+Also tune WARMDOWN_FRAC: 0.3 (shorter decay, more stable phase) vs 0.7 (longer decay).
 
 **Warmup tuning**
 Current: WARMUP_ITERS=200. Try 100 or 400. Affects how quickly LR reaches peak.
@@ -332,24 +375,10 @@ if it > int(max_iters * 0.80):
 ```
 Free generalization improvement. Source: arXiv:2502.06761
 
-**Trapezoidal LR schedule**
-Alternative to WSD: warmup -> hold -> linear decay (simpler, no cosine in decay phase).
-```python
-def get_lr(it, max_iters):
-    decay_start = int(max_iters * 0.85)
-    if it < WARMUP_ITERS:
-        return LEARNING_RATE * it / WARMUP_ITERS
-    if it < decay_start:
-        return LEARNING_RATE
-    ratio = (it - decay_start) / (max_iters - decay_start)
-    return LEARNING_RATE * (1 - ratio) + MIN_LR * ratio
-```
-Used by nanoGPT speedrun. Ablation vs. WSD — one or the other may suit short runs better.
-
 ### Tier 3 — Lower Impact
 
 **Dropout**
-Current: DROPOUT=0.4. Try 0.3 (less regularization) or 0.5 (more).
+Current: DROPOUT=0.2. Try 0.1 (less regularization) or 0.3 (more).
 
 **Weight decay**
 Current: WEIGHT_DECAY=0.1. Try 0.01 (less) or 0.3 (more aggressive).
@@ -372,18 +401,42 @@ Current: bias=False throughout. Try adding bias=True to QKV and projection layer
 
 Attempt only after each component is in the CONTEXT.md leaderboard with kept=YES.
 
-**Bundle A**: QK-Norm + higher LR (QK-Norm stabilizes attention, enabling the LR push)
-**Bundle B**: All kept individual improvements combined
+**Bundle A**: Higher LR + WARMDOWN_FRAC tuning (explore the LR-schedule interaction)
+**Bundle B**: All kept individual improvements combined into one config
+
+### Tier 5 — Novel / Self-Directed Research
+
+This tier is intentionally open-ended. After Tier 1-3 are explored, or when literature search
+surfaces a new technique, you are free to propose and implement ideas not on this list.
+
+**Guidelines for novel hypotheses**:
+- WebSearch first to verify the idea has been tried and shown to work at small scale
+- Write the hypothesis clearly in NOTES.md before implementing: what, why, expected delta
+- If it requires >50 lines of new code, break it into sub-experiments (e.g. architecture first,
+  then tuning) — do not combine multiple novel ideas into one experiment
+- Novel techniques that fail still have value: log them with `[NOVEL]` tag in notes so future
+  runs know the direction was explored
+
+**Example directions to consider** (not exhaustive):
+- Mixture-of-Experts (MoE) routing for MLP layers
+- Differential attention (subtracting two attention heads to reduce noise)
+- Rotary position embedding variants (YaRN, LongRoPE scaling)
+- ALiBi as RoPE replacement (learned-free, extrapolates to longer sequences)
+- Peri-LN (pre + post norm, used in Gemma/OLMo)
+- Weight-tied input/output embeddings already done; try untying and compare
+- Muon tuning: try ns_steps=3 or 7, or different Newton-Schulz coefficients
+- Curriculum learning: start with shorter BLOCK_SIZE, increase mid-training
 
 ---
 
 ## Literature Research
 
 ### When to search
-Run a literature search in the same three cases as step 1.5:
+Run a literature search in the same cases as step 1.5:
 - (a) First run — survey state of the art before starting.
-- (b) Failure streak of 3+ — stuck and need ideas from outside the Exploration Guide.
-- (c) About to implement a technique not in the Exploration Guide — verify correct hyperparameters and implementation details first.
+- (b) Every 5th experiment — periodic scan for recent work.
+- (c) Failure streak of 3+ — stuck and need ideas from outside the Exploration Guide.
+- (d) About to implement a technique not in the Exploration Guide — verify correct hyperparameters and implementation details first.
 
 ### How to search
 
@@ -460,9 +513,9 @@ After running, `log_result.py` will:
 
 If `CONTEXT.md` does not exist, this is your first run:
 1. **Check venv**: if `.venv` does not exist, run `uv venv .venv && uv pip install -r requirements.txt` first.
-2. **Check data**: if `data/input.bin` does not exist, run `uv run python prepare.py` first (downloads TinyStories, trains BPE tokenizer, writes data/).
+2. **Check data**: if `data/input.bin` does not exist, run `uv run python prepare.py` first (downloads FineWeb-Edu, trains BPE tokenizer, writes data/ with 16-byte header binary format).
 3. `uv run python train.py > run.log 2>&1` — run the default config (~5 min)
 4. `grep "val_bpb:" run.log` — read the result
-5. `uv run python log_result.py --name "baseline" --val_bpb X.XXXXXX --notes "Baseline: RoPE+Flash+ReGLU+MQA+WSD+LogitCap+RMSNorm+Muon+NoClip, N_EMBD=384 N_LAYER=8 DROPOUT=0.4 WD=0.1 LR=1e-3. TinyStories BPE vocab=8192."`
+5. `uv run python log_result.py --name "baseline_v2" --val_bpb X.XXXXXX --notes "Baseline: RoPE+QKNorm+SSSL+FA3+ReGLU+Trap LR+PerParamLR+MQA+LogitCap15+RMSNorm+Muon+NoClip, N_EMBD=384 N_LAYER=8 DROPOUT=0.2 WD=0.1 LR=1e-3. FineWeb-Edu BPE vocab=8192."`
 4. Run the suggested git commit.
 5. Begin the research loop from step 1.

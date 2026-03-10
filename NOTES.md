@@ -9,14 +9,14 @@ Update it after literature searches, every 5 experiments, and whenever a meaning
 
 **Update this section every time a new val_bpb record is set (kept: YES).**
 
-- **Experiment**: `baseline_ext` | **Val BPB**: 0.845044
+- **Experiment**: TBD (new dataset -- run baseline_v2 first)
 - N_EMBD=384, N_HEAD=8, N_KV_HEAD=1, N_LAYER=8
-- BLOCK_SIZE=256, BATCH_SIZE=128, DROPOUT=0.4, WEIGHT_DECAY=0.1
-- LEARNING_RATE=1e-3, MIN_LR=1e-4, WARMUP_ITERS=200, no grad clipping
-- Optimizer: Muon (matrix) + AdamW (1D), muon_lr=0.02, muon_momentum=0.95
+- BLOCK_SIZE=256, BATCH_SIZE=128, DROPOUT=0.2, WEIGHT_DECAY=0.1
+- LEARNING_RATE=1e-3, MIN_LR=0.0, WARMUP_ITERS=200, WARMDOWN_FRAC=0.5
+- Optimizer: Muon (matrix) + AdamW embed (LR*3.0) + AdamW scalar (LR*1.0)
 - MLP: ReGLU (ReLU^2)
-- Dataset: TinyStories 10%, BPE vocab=8192
-- ~12M params, 1387 iters/10min (680 iters/5min)
+- Dataset: FineWeb-Edu sample-10BT, N_SAMPLES=500k, BPE vocab=8192
+- ~12M params, iter rate TBD on new dataset
 
 ---
 
@@ -24,14 +24,17 @@ Update it after literature searches, every 5 experiments, and whenever a meaning
 
 Update after every 5 experiments. Format: `HP=SENSITIVITY (evidence)`.
 
-Sensitivity unknown on new dataset/tokenizer -- revalidate everything from scratch.
+**RESET**: New dataset (FineWeb-Edu), new architecture (QK-Norm, SSSL, trap LR, per-param LR).
+All sensitivities unknown -- revalidate everything from scratch on baseline_v2.
 
-- LR = HIGH (sweet spot ~2e-3; 1e-3→2e-3 delta=0.035 at 5min; 3e-3 overshoots)
+- LR = UNKNOWN (old sweet spot was ~2e-3 on TinyStories; QK-Norm may enable higher)
+- WARMDOWN_FRAC = UNKNOWN (0.5 is untested; 50% decay window may be too aggressive)
+- EMBED_LR_MULT = UNKNOWN (3.0 is initial guess; may be too high or too low)
 - N_EMBD = UNKNOWN (revalidate)
 - N_LAYER = UNKNOWN (revalidate)
-- DROPOUT = UNKNOWN (0.4 is high; TinyStories larger so may need less -- next to test)
+- DROPOUT = UNKNOWN (0.2 baseline; FineWeb-Edu is larger so may need less)
 - WEIGHT_DECAY = UNKNOWN (revalidate)
-- WARMUP_ITERS = LOW (historically minor effect)
+- WARMUP_ITERS = LOW (historically minor effect; likely still low)
 
 ---
 
@@ -58,8 +61,13 @@ Technique-specific tips discovered during experiments or research.
 
 Agent's working theory of the loss landscape. Update when the picture changes.
 
-5 experiments in. Baseline calibrated: 0.955 at 5min, 0.845 at 10min.
+**RESET**: New dataset, new baseline architecture. Previous mental model invalidated.
 
-Key insight: the baseline_ext (10min) is hard to beat at 5min because the model genuinely needs ~1400 iters to converge. LR=2e-3 helps at 5min (0.921) but doesn't beat the 10min run. To beat 0.845 at 5min, need either: (a) architectural improvement that lowers asymptotic loss faster, (b) higher LR that converges in fewer iters, or (c) lower dropout that removes regularization overhead.
+Starting fresh with FineWeb-Edu (diverse educational web text, ~400M train tokens).
+Baseline now includes: QK-Norm, SSSL sliding window, trapezoidal LR, per-param-group LR.
+These are all proven in Karpathy speedrun -- the delta vs. old TinyStories baseline is unknown.
 
-QK-Norm alone at LR=1e-3 significantly hurt (1.137) -- normalization may conflict with Muon's orthogonalization OR needs higher LR to help (as designed). LR sweep shows 2e-3 is better than both 1e-3 and 3e-3 at 5min. DROPOUT=0.4 is next to investigate -- may be unnecessarily slowing convergence on the larger TinyStories dataset.
+FineWeb-Edu is harder than TinyStories (more diverse, longer vocabulary, real-world text).
+Expected val_bpb range: 0.8-1.0 (TinyStories was artificially easy ~0.85).
+First priority: establish baseline_v2 and calibrate the new loss landscape.
+Then: sweep LR (QK-Norm should allow pushing higher), WARMDOWN_FRAC, EMBED_LR_MULT.

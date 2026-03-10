@@ -1,33 +1,60 @@
 """
-prepare.py — Downloads TinyStories, trains BPE tokenizer (vocab=8192), tokenizes to binary.
+prepare.py -- Downloads FineWeb-Edu, trains BPE tokenizer (vocab=8192), tokenizes to binary.
 Run once before training. Outputs:
-  data/input.bin      — uint16 tokens (train split)
-  data/val.bin        — uint16 tokens (val split)
-  data/meta.json      — vocab_size, avg_bytes_per_token (needed for val_bpb)
-  data/tokenizer.json — saved BPE tokenizer (for inspection/reuse)
+  data/input.bin      -- uint16 tokens (train split), 16-byte header
+  data/val.bin        -- uint16 tokens (val split), 16-byte header
+  data/meta.json      -- vocab_size, avg_bytes_per_token (needed for val_bpb)
+  data/tokenizer.json -- saved BPE tokenizer (for inspection/reuse)
+
+Binary format (both input.bin and val.bin):
+  Header (16 bytes): magic(uint32) version(uint32) vocab_size(uint32) n_tokens(uint32)
+  Body: n_tokens x uint16 tokens
+
+Scale knobs:
+  N_SAMPLES = 500_000 for RTX 5070 (~400M tokens)
+  N_SAMPLES = 5_000_000 for H100  (~4B tokens)
 """
 import os, json, struct
+import numpy as np
 from datasets import load_dataset
 from tokenizers import Tokenizer
 from tokenizers.models import BPE
 from tokenizers.trainers import BpeTrainer
 from tokenizers.pre_tokenizers import ByteLevel
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+DATA_DIR   = os.path.join(os.path.dirname(__file__), "data")
 VOCAB_SIZE = 8192
-DATASET_FRACTION = "10%"   # ~200MB text -- enough data, fast download
+DATASET    = "HuggingFaceFW/fineweb-edu"
+SUBSET     = "sample-10BT"
+N_SAMPLES  = 500_000   # train docs (~400M tokens on RTX 5070); increase for H100
+N_VAL      = 10_000    # val docs (~8M tokens, enough for stable eval)
+
+MAGIC   = 0x544F4B53   # "TOKS"
+VERSION = 1
+
+
+def write_bin(path, tokens, vocab_size):
+    """Write tokens to binary file with 16-byte header."""
+    arr = np.array(tokens, dtype=np.uint16)
+    n = len(arr)
+    with open(path, "wb") as f:
+        f.write(struct.pack("<IIII", MAGIC, VERSION, vocab_size, n))
+        arr.tofile(f)
+    return n
 
 
 def main():
     os.makedirs(DATA_DIR, exist_ok=True)
 
-    # 1. Download TinyStories (train + validation splits)
-    print("Downloading TinyStories...")
-    train_ds = load_dataset("roneneldan/TinyStories", split=f"train[:{DATASET_FRACTION}]")
-    val_ds   = load_dataset("roneneldan/TinyStories", split="validation[:5%]")
+    # 1. Load FineWeb-Edu -- take only what we need (no full 10BT download)
+    total = N_SAMPLES + N_VAL
+    print(f"Loading {DATASET} ({SUBSET}), taking {total:,} docs...")
+    ds = load_dataset(DATASET, name=SUBSET, split=f"train[:{total}]")
+    train_ds = ds.select(range(N_SAMPLES))
+    val_ds   = ds.select(range(N_SAMPLES, len(ds)))
     train_texts = train_ds["text"]
     val_texts   = val_ds["text"]
-    print(f"  Train stories: {len(train_texts):,} | Val stories: {len(val_texts):,}")
+    print(f"  Train docs: {len(train_texts):,} | Val docs: {len(val_texts):,}")
 
     # 2. Train BPE tokenizer on train text
     print(f"Training BPE tokenizer (vocab={VOCAB_SIZE})...")
@@ -38,33 +65,29 @@ def main():
     tokenizer.save(os.path.join(DATA_DIR, "tokenizer.json"))
     print(f"  Tokenizer trained. Vocab size: {tokenizer.get_vocab_size()}")
 
-    # 3. Tokenize train and compute avg_bytes_per_token
+    # 3. Tokenize train split and compute avg_bytes_per_token
     print("Tokenizing train split...")
     all_tokens = []
     total_bytes = 0
-    for text in train_texts:
+    for i, text in enumerate(train_texts):
         enc = tokenizer.encode(text)
         all_tokens.extend(enc.ids)
         total_bytes += len(text.encode("utf-8"))
+        if (i + 1) % 50_000 == 0:
+            print(f"  {i+1:,}/{len(train_texts):,} docs, {len(all_tokens):,} tokens")
     avg_bytes_per_token = total_bytes / len(all_tokens)
 
-    # Write train binary: header = (vocab_size, n_tokens) as uint32, then uint16 tokens
-    input_bin = os.path.join(DATA_DIR, "input.bin")
-    with open(input_bin, "wb") as f:
-        f.write(struct.pack("<II", tokenizer.get_vocab_size(), len(all_tokens)))
-        for t in all_tokens:
-            f.write(struct.pack("<H", t))
+    # Write train binary with 16-byte header
+    n_train = write_bin(os.path.join(DATA_DIR, "input.bin"),
+                        all_tokens, tokenizer.get_vocab_size())
 
     # 4. Tokenize val split
     print("Tokenizing val split...")
     val_tokens = []
     for text in val_texts:
         val_tokens.extend(tokenizer.encode(text).ids)
-    val_bin = os.path.join(DATA_DIR, "val.bin")
-    with open(val_bin, "wb") as f:
-        f.write(struct.pack("<II", tokenizer.get_vocab_size(), len(val_tokens)))
-        for t in val_tokens:
-            f.write(struct.pack("<H", t))
+    n_val = write_bin(os.path.join(DATA_DIR, "val.bin"),
+                      val_tokens, tokenizer.get_vocab_size())
 
     # 5. Write meta.json
     meta = {
@@ -75,8 +98,8 @@ def main():
         json.dump(meta, f, indent=2)
 
     print(f"\nDone.")
-    print(f"  Train tokens : {len(all_tokens):,}")
-    print(f"  Val tokens   : {len(val_tokens):,}")
+    print(f"  Train tokens : {n_train:,}")
+    print(f"  Val tokens   : {n_val:,}")
     print(f"  avg bytes/tok: {avg_bytes_per_token:.3f}")
     print(f"  Vocab size   : {tokenizer.get_vocab_size()}")
 

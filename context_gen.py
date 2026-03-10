@@ -6,33 +6,42 @@ import os
 from datetime import datetime
 import db
 
-CONTEXT_PATH = os.path.join(os.path.dirname(__file__), "CONTEXT.md")
-NOTES_PATH   = os.path.join(os.path.dirname(__file__), "NOTES.md")
+CONTEXT_PATH   = os.path.join(os.path.dirname(__file__), "CONTEXT.md")
+NOTES_PATH     = os.path.join(os.path.dirname(__file__), "NOTES.md")
+MEMORY_LOG_PATH = os.path.join(os.path.dirname(__file__), "MEMORY_LOG.md")
 
 # Ordered list of (display_name, tier, [name_keywords])
-# Keywords are checked against all experiment names (lowercase, space-joined)
+# Keywords are checked against all experiment names (lowercase, space-joined).
+# NOTE: QK-Norm, Trapezoidal LR, Sliding window SSSL, FA3, Per-param LR are
+# already in the v2 baseline — intentionally omitted here.
 _TECHNIQUES = [
-    # Tier 1 — high impact (Flash Attention, SwiGLU already in baseline — omitted)
-    ("Learning rate tuning",  1, ["lr_", "lr3", "lr6", "learning_rate"]),
-    ("QK-Norm",               1, ["qk_norm", "qknorm"]),
-    ("nGPT",                  1, ["ngpt", "normalized_gpt"]),
-    # Tier 2 — medium (RoPE, GQA/MQA, WSD already in baseline — omitted)
+    # Tier 1 — high impact
+    ("Higher LR (QK-Norm enables push)",  1, ["higher_lr", "lr_2e3", "lr_3e3", "lr2e", "lr3e"]),
+    ("nGPT (normalized transformer)",     1, ["ngpt", "normalized_gpt"]),
+    # Tier 2 — medium
     ("Depth/width tradeoff",  2, ["n_layer_", "n_embd_", "embd_", "deeper", "wider", "layer_"]),
+    ("LR tuning",             2, ["lr_", "lr3", "lr6", "learning_rate", "warmdown"]),
     ("Warmup tuning",         2, ["warmup"]),
     ("Batch size",            2, ["batch_", "bs_", "bsz"]),
     ("SWA",                   2, ["swa", "weight_avg", "ema_weights"]),
-    ("Trapezoidal LR",        2, ["trapezoid", "trapezoidal"]),
-    ("Higher LR",             2, ["higher_lr", "lr_2e3", "lr_3e3"]),
+    ("EMBED_LR_MULT tuning",  2, ["embed_lr", "embdlr", "embed_mult"]),
+    ("WINDOW_SIZE tuning",    2, ["window_", "sssl_", "local_attn"]),
     # Tier 3 — lower
-    ("Bias terms",            3, ["_bias"]),
     ("Dropout",               3, ["dropout", "drop_"]),
     ("Weight decay",          3, ["weight_decay", "wd_"]),
     ("Block size",            3, ["block_size", "block_", "ctx_", "seq_"]),
     ("AdamW beta2",           3, ["beta2", "b2_"]),
-    ("Gradient clipping",     3, ["grad_clip", "clip_", "no_clip", "clip_off", "clip_none", "clip_1", "clip_5"]),
-    ("Post-norm",             3, ["post_norm", "postnorm"]),
-    # Tier 4 — literature / ambitious
-    ("Peri-LN",               4, ["peri", "peri_ln"]),
+    ("Gradient clipping",     3, ["grad_clip", "clip_", "no_clip"]),
+    ("Bias terms",            3, ["_bias"]),
+    # Tier 4 — combinations
+    ("Bundle A (LR + warmdown)",          4, ["bundle_a", "bundle_lr"]),
+    ("Bundle B (all kept combined)",      4, ["bundle_b", "bundle_all"]),
+    # Tier 5 — novel / literature-sourced
+    ("Peri-LN",               5, ["peri", "peri_ln"]),
+    ("Differential attention", 5, ["diff_attn", "differential"]),
+    ("MoE MLP",               5, ["moe", "mixture_of_experts"]),
+    ("ALiBi",                 5, ["alibi"]),
+    ("Novel (agent-proposed)", 5, ["novel_", "_novel"]),
 ]
 
 
@@ -46,11 +55,32 @@ def _unexplored_section(all_names):
     if not by_tier:
         return "## Unexplored Techniques\nAll mapped techniques have been attempted.\n"
 
-    tier_labels = {1: "Tier 1 (high impact)", 2: "Tier 2 (medium)", 3: "Tier 3 (lower)", 4: "Tier 4 / Literature"}
+    tier_labels = {
+        1: "Tier 1 (high impact)",
+        2: "Tier 2 (medium)",
+        3: "Tier 3 (lower)",
+        4: "Tier 4 (combinations)",
+        5: "Tier 5 (novel / literature)",
+    }
     lines = ["## Unexplored Techniques\n"]
     for tier in sorted(by_tier):
         lines.append(f"**{tier_labels[tier]}**: {', '.join(by_tier[tier])}")
     return "\n".join(lines) + "\n"
+
+
+def _memory_alert_section():
+    """Return recent MEMORY_LOG anomalies (non-OK rows) for agent awareness."""
+    if not os.path.exists(MEMORY_LOG_PATH):
+        return ""
+    with open(MEMORY_LOG_PATH, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    # Collect anomaly detail lines (start with "> [")
+    alerts = [l.rstrip() for l in lines if l.startswith("> [")]
+    if not alerts:
+        return ""
+    recent = alerts[-5:]  # last 5 anomalies
+    block = "\n".join(recent)
+    return f"\n## Recent Memory Anomalies\n{block}\n"
 
 
 def generate():
@@ -119,6 +149,7 @@ def generate():
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     unexplored = _unexplored_section(all_names)
+    mem_alerts = _memory_alert_section()
 
     content = f"""# Research Context -- Updated {timestamp}
 
@@ -133,7 +164,7 @@ def generate():
 ## Progress
 - Total experiments: {total}  |  Kept (improvements): {kept_count} ({pct})
 - Initial baseline bpb: {baseline_str}  |  Best so far: {best_str}  |  Improvement: {improvement_str}
-"""
+{mem_alerts}"""
 
     # Append agent-written notes if they exist (survives regeneration)
     if os.path.exists(NOTES_PATH):

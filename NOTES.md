@@ -26,10 +26,10 @@ Update after every 5 experiments. Format: `HP=SENSITIVITY (evidence)`.
 
 Sensitivity unknown on new dataset/tokenizer -- revalidate everything from scratch.
 
-- LR = UNKNOWN (revalidate -- Muon may tolerate higher LR on larger dataset)
-- N_EMBD = UNKNOWN (TinyShakespeare sweet spot was 384; TinyStories is larger so bigger models may generalize better)
+- LR = HIGH (sweet spot ~2e-3; 1e-3→2e-3 delta=0.035 at 5min; 3e-3 overshoots)
+- N_EMBD = UNKNOWN (revalidate)
 - N_LAYER = UNKNOWN (revalidate)
-- DROPOUT = UNKNOWN (TinyStories is larger -- less overfit risk, may need less dropout)
+- DROPOUT = UNKNOWN (0.4 is high; TinyStories larger so may need less -- next to test)
 - WEIGHT_DECAY = UNKNOWN (revalidate)
 - WARMUP_ITERS = LOW (historically minor effect)
 
@@ -58,6 +58,8 @@ Technique-specific tips discovered during experiments or research.
 
 Agent's working theory of the loss landscape. Update when the picture changes.
 
-_Fresh start_: Switched from TinyShakespeare (char-level, 65 vocab) to TinyStories (BPE, 8192 vocab).
-Dataset is much larger and more diverse -- GPU overfit is less of a problem. Metric is now val_bpb.
-Run baseline first to calibrate the bpb scale before drawing conclusions.
+5 experiments in. Baseline calibrated: 0.955 at 5min, 0.845 at 10min.
+
+Key insight: the baseline_ext (10min) is hard to beat at 5min because the model genuinely needs ~1400 iters to converge. LR=2e-3 helps at 5min (0.921) but doesn't beat the 10min run. To beat 0.845 at 5min, need either: (a) architectural improvement that lowers asymptotic loss faster, (b) higher LR that converges in fewer iters, or (c) lower dropout that removes regularization overhead.
+
+QK-Norm alone at LR=1e-3 significantly hurt (1.137) -- normalization may conflict with Muon's orthogonalization OR needs higher LR to help (as designed). LR sweep shows 2e-3 is better than both 1e-3 and 3e-3 at 5min. DROPOUT=0.4 is next to investigate -- may be unnecessarily slowing convergence on the larger TinyStories dataset.

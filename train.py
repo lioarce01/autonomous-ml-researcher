@@ -227,7 +227,7 @@ def main():
             {"params": nodecay_params, "weight_decay": 0.0},
         ],
         lr=LEARNING_RATE,
-        betas=(0.9, 0.95),
+        betas=(0.9, 0.99),
     )
 
     t0 = time.time()

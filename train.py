@@ -26,7 +26,7 @@ N_EMBD         = 512        # embedding dimension
 N_HEAD         = 8          # number of attention heads
 N_KV_HEAD      = 1          # number of KV heads for GQA (must divide N_HEAD)
 N_LAYER        = 6          # number of transformer blocks
-DROPOUT        = 0.0        # dropout (0.0 = off; good for small data)
+DROPOUT        = 0.2        # dropout (regularize against memorization on GPU)
 LEARNING_RATE  = 1e-3       # peak learning rate
 MIN_LR         = 1e-4       # minimum LR (cosine decay floor)
 WEIGHT_DECAY   = 0.01

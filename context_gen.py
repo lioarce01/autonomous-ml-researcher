@@ -8,12 +8,56 @@ import db
 
 CONTEXT_PATH = os.path.join(os.path.dirname(__file__), "CONTEXT.md")
 
+# Ordered list of (display_name, tier, [name_keywords])
+# Keywords are checked against all experiment names (lowercase, space-joined)
+_TECHNIQUES = [
+    ("Learning rate tuning",  1, ["lr_", "lr3", "lr6", "learning_rate"]),
+    ("Flash Attention",       1, ["flash", "sdpa"]),
+    ("SwiGLU",                1, ["swiglu"]),
+    ("RMSNorm",               1, ["rmsnorm", "rms_norm"]),
+    ("Depth/width tradeoff",  2, ["n_layer_", "n_embd_", "deeper", "wider", "layer_"]),
+    ("RoPE",                  2, ["rope", "rotary"]),
+    ("GQA",                   2, ["gqa", "kv_head"]),
+    ("Warmup tuning",         2, ["warmup"]),
+    ("Batch size",            2, ["batch_", "bs_", "bsz"]),
+    ("Bias terms",            3, ["_bias"]),
+    ("Dropout",               3, ["dropout", "drop_"]),
+    ("Weight decay",          3, ["weight_decay", "wd_"]),
+    ("Block size",            3, ["block_size", "ctx_", "seq_"]),
+    ("AdamW beta2",           3, ["beta2", "b2_"]),
+    ("Gradient clipping",     3, ["grad_clip", "clip_"]),
+    ("Post-norm",             3, ["post_norm", "postnorm"]),
+    ("Muon optimizer",        4, ["muon"]),
+    ("nGPT",                  4, ["ngpt"]),
+    ("WSD schedule",          4, ["wsd"]),
+    ("Peri-LN",               4, ["peri", "peri_ln"]),
+]
+
+
+def _unexplored_section(all_names):
+    name_str = " ".join(all_names).lower()
+    by_tier = {}
+    for display, tier, keywords in _TECHNIQUES:
+        if not any(kw in name_str for kw in keywords):
+            by_tier.setdefault(tier, []).append(display)
+
+    if not by_tier:
+        return "## Unexplored Techniques\nAll mapped techniques have been attempted.\n"
+
+    tier_labels = {1: "Tier 1 (high impact)", 2: "Tier 2 (medium)", 3: "Tier 3 (lower)", 4: "Tier 4 / Literature"}
+    lines = ["## Unexplored Techniques\n"]
+    for tier in sorted(by_tier):
+        lines.append(f"**{tier_labels[tier]}**: {', '.join(by_tier[tier])}")
+    return "\n".join(lines) + "\n"
+
 
 def generate():
     stats = db.get_stats()
     top = db.get_top(5)
     failures = db.get_recent_failures(3)
     baseline = db.get_baseline()
+    streak = db.get_failure_streak()
+    all_names = [e["name"] for e in db.get_all()]
 
     total = stats["total"] or 0
     kept_count = int(stats["kept_count"] or 0)
@@ -23,10 +67,12 @@ def generate():
     # Current best
     if top:
         best = top[0]
+        streak_str = f"  |  Failure streak: {streak}" if streak > 0 else ""
         best_section = (
             f"**Experiment**: `{best['name']}` | "
             f"**Val Loss**: `{best['val_loss']:.6f}` | "
-            f"**Notes**: {best['notes'] or '—'}"
+            f"**Notes**: {best['notes'] or '-'}"
+            f"{streak_str}"
         )
     else:
         best_section = "_No experiments logged yet._"
@@ -38,7 +84,7 @@ def generate():
         for i, exp in enumerate(top, 1):
             rows += (
                 f"| {i} | `{exp['name']}` | `{exp['val_loss']:.6f}` "
-                f"| {exp['notes'] or '—'} | {exp['timestamp'][:16]} |\n"
+                f"| {exp['notes'] or '-'} | {exp['timestamp'][:16]} |\n"
             )
         leaderboard = header + rows
     else:
@@ -51,7 +97,7 @@ def generate():
         for exp in failures:
             f_rows += (
                 f"| `{exp['name']}` | `{exp['val_loss']:.6f}` "
-                f"| {exp['notes'] or '—'} |\n"
+                f"| {exp['notes'] or '-'} |\n"
             )
         failures_section = f_header + f_rows
     else:
@@ -70,7 +116,9 @@ def generate():
 
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    content = f"""# Research Context — Updated {timestamp}
+    unexplored = _unexplored_section(all_names)
+
+    content = f"""# Research Context -- Updated {timestamp}
 
 ## Current Best
 {best_section}
@@ -79,6 +127,7 @@ def generate():
 {leaderboard}
 ## Recent Non-Improvements (last 3)
 {failures_section}
+{unexplored}
 ## Progress
 - Total experiments: {total}  |  Kept (improvements): {kept_count} ({pct})
 - Initial baseline loss: {baseline_str}  |  Best so far: {best_str}  |  Improvement: {improvement_str}

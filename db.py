@@ -105,3 +105,18 @@ def get_stats() -> dict:
     result = dict(row)
     conn.close()
     return result
+
+
+def get_failure_streak():
+    """Count of consecutive non-improvements at the tail of experiment history."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT kept FROM experiments ORDER BY id DESC"
+        ).fetchall()
+    streak = 0
+    for r in rows:
+        if r["kept"] == 0:
+            streak += 1
+        else:
+            break
+    return streak

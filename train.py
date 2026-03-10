@@ -28,7 +28,7 @@ N_HEAD         = 8          # number of attention heads
 N_KV_HEAD      = 1          # number of KV heads for GQA (must divide N_HEAD)
 N_LAYER        = 8          # number of transformer blocks
 DROPOUT        = 0.4        # dropout (regularize against memorization on GPU)
-LEARNING_RATE  = 1e-3       # peak learning rate
+LEARNING_RATE  = 2e-3       # peak learning rate
 MIN_LR         = 1e-4       # minimum LR (cosine decay floor)
 WEIGHT_DECAY   = 0.1
 WARMUP_ITERS   = 200        # LR warmup steps
@@ -137,9 +137,6 @@ class CausalSelfAttention(nn.Module):
         k, v = kv.split(self.n_kv_head * head_dim, dim=2)
         k = k.view(B, T, self.n_kv_head, head_dim).transpose(1, 2)
         v = v.view(B, T, self.n_kv_head, head_dim).transpose(1, 2)
-        # QK-Norm: normalize before RoPE to stabilize attention entropy
-        q = q / (q.norm(dim=-1, keepdim=True) + 1e-6)
-        k = k / (k.norm(dim=-1, keepdim=True) + 1e-6)
         cos, sin = _build_rope(T, head_dim, x.device)
         q = _apply_rope(q, cos, sin)
         k = _apply_rope(k, cos, sin)

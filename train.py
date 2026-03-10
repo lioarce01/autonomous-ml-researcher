@@ -24,6 +24,7 @@ BATCH_SIZE     = 16         # micro-batch size
 BLOCK_SIZE     = 128        # context length (tokens)
 N_EMBD         = 192        # embedding dimension
 N_HEAD         = 6          # number of attention heads
+N_KV_HEAD      = 2          # number of KV heads for GQA (must divide N_HEAD)
 N_LAYER        = 6          # number of transformer blocks
 DROPOUT        = 0.0        # dropout (0.0 = off; good for small data)
 LEARNING_RATE  = 1e-3       # peak learning rate
@@ -88,27 +89,35 @@ def _apply_rope(x, cos, sin):
 
 
 class CausalSelfAttention(nn.Module):
-    def __init__(self, n_embd, n_head, block_size, dropout):
+    def __init__(self, n_embd, n_head, n_kv_head, block_size, dropout):
         super().__init__()
         assert n_embd % n_head == 0
+        assert n_head % n_kv_head == 0
         self.n_head = n_head
+        self.n_kv_head = n_kv_head
+        self.n_rep = n_head // n_kv_head
         self.n_embd = n_embd
         self.dropout = dropout
-        self.c_attn = nn.Linear(n_embd, 3 * n_embd, bias=False)
+        head_dim = n_embd // n_head
+        self.c_q  = nn.Linear(n_embd, n_embd, bias=False)
+        self.c_kv = nn.Linear(n_embd, 2 * n_kv_head * head_dim, bias=False)
         self.c_proj = nn.Linear(n_embd, n_embd, bias=False)
         self.resid_drop = nn.Dropout(dropout)
 
     def forward(self, x):
         B, T, C = x.size()
-        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-
         head_dim = C // self.n_head
+        q = self.c_q(x).view(B, T, self.n_head, head_dim).transpose(1, 2)
+        kv = self.c_kv(x)
+        k, v = kv.split(self.n_kv_head * head_dim, dim=2)
+        k = k.view(B, T, self.n_kv_head, head_dim).transpose(1, 2)
+        v = v.view(B, T, self.n_kv_head, head_dim).transpose(1, 2)
         cos, sin = _build_rope(T, head_dim, x.device)
         q = _apply_rope(q, cos, sin)
         k = _apply_rope(k, cos, sin)
+        # expand KV to match query heads
+        k = k.repeat_interleave(self.n_rep, dim=1)
+        v = v.repeat_interleave(self.n_rep, dim=1)
         y = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         return self.resid_drop(self.c_proj(y))
@@ -128,10 +137,10 @@ class MLP(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, n_embd, n_head, block_size, dropout):
+    def __init__(self, n_embd, n_head, n_kv_head, block_size, dropout):
         super().__init__()
         self.ln1 = nn.LayerNorm(n_embd)
-        self.attn = CausalSelfAttention(n_embd, n_head, block_size, dropout)
+        self.attn = CausalSelfAttention(n_embd, n_head, n_kv_head, block_size, dropout)
         self.ln2 = nn.LayerNorm(n_embd)
         self.mlp = MLP(n_embd, dropout)
 
@@ -142,13 +151,13 @@ class Block(nn.Module):
 
 
 class GPT(nn.Module):
-    def __init__(self, vocab_size, n_embd, n_head, n_layer, block_size, dropout):
+    def __init__(self, vocab_size, n_embd, n_head, n_kv_head, n_layer, block_size, dropout):
         super().__init__()
         self.block_size = block_size
         self.transformer = nn.ModuleDict(dict(
             wte=nn.Embedding(vocab_size, n_embd),
             drop=nn.Dropout(dropout),
-            h=nn.ModuleList([Block(n_embd, n_head, block_size, dropout) for _ in range(n_layer)]),
+            h=nn.ModuleList([Block(n_embd, n_head, n_kv_head, block_size, dropout) for _ in range(n_layer)]),
             ln_f=nn.LayerNorm(n_embd),
         ))
         self.lm_head = nn.Linear(n_embd, vocab_size, bias=False)
@@ -235,7 +244,7 @@ def main():
     train_data = tokens[:n]
     val_data = tokens[n:]
 
-    model = GPT(vocab_size, N_EMBD, N_HEAD, N_LAYER, BLOCK_SIZE, DROPOUT).to(device)
+    model = GPT(vocab_size, N_EMBD, N_HEAD, N_KV_HEAD, N_LAYER, BLOCK_SIZE, DROPOUT).to(device)
     print(f"Parameters: {model.num_params()/1e6:.2f}M")
 
     # Optimizer — separate weight decay for tensors ≥ 2D

@@ -25,6 +25,11 @@ You are an ML research agent running inside Claude Code. Your environment is a d
 Repeat forever until `.pause` exists:
 
 1. **Read `CONTEXT.md`** (if it exists) — internalize the leaderboard, recent failures, and current best. Skip this step only on the very first run.
+1.5. **Literature check (conditional)** — Run only when one of these is true:
+   - (a) First run (no CONTEXT.md) — survey state of the art before starting.
+   - (b) Failure streak of 3+ — need fresh ideas from outside the Exploration Guide.
+   - (c) About to implement a technique not in the Exploration Guide — verify correct implementation details before coding.
+   See the **Literature Research** section below for how to search. Skip on normal iterations to avoid wasting budget.
 2. **Form a hypothesis** — one specific change. Write it out mentally: *"I will change X from A to B because this should reduce val_loss by approximately Y due to Z."*
 3. **Plan the revert** — note the current values you are about to change, so you can restore them exactly if the experiment fails.
 4. **Edit `train.py`** — make exactly one meaningful change.
@@ -204,6 +209,65 @@ Only attempt these after each component has been individually validated:
 - RoPE + RMSNorm
 - Best LR + best architecture change
 - All validated improvements combined (final config)
+
+---
+
+## Literature Research
+
+### When to search
+Run a literature search in the same three cases as step 1.5:
+- (a) First run — survey state of the art before starting.
+- (b) Failure streak of 3+ — stuck and need ideas from outside the Exploration Guide.
+- (c) About to implement a technique not in the Exploration Guide — verify correct hyperparameters and implementation details first.
+
+### How to search
+
+Claude Code has `WebSearch` and `WebFetch` tools. Use them like this:
+
+```
+WebSearch: "arxiv [technique] transformer language model 2024 2025"
+WebSearch: "site:arxiv.org [topic] pretraining optimization"
+WebFetch:  https://arxiv.org/abs/[paper-id]   <- read abstract + intro only
+```
+
+Read the abstract and conclusion only — do not read full papers. Extract: technique name, key hyperparameters, reported improvement, constraints.
+
+### What to search for
+
+Use these query templates, substituting your specific topic:
+
+- `"arxiv small language model pretraining optimization 2024 2025 2026"`
+- `"arxiv transformer learning rate schedule language model 2024 2025 2026"`
+- `"arxiv attention mechanism efficient small scale 2024 2025 2026"`
+- `"arxiv optimizer language model AdamW alternative 2024 2025 2026"`
+- `"arxiv weight initialization transformer training 2024 2025 2026"`
+- `"arxiv normalization layer transformer 2024 2025 2026"`
+- `"arxiv language model pretraining technique 2025 2026"`
+- `"paperswithcode language modeling character level leaderboard"`
+
+### How to apply findings
+
+- Extract exactly one implementable technique per search session.
+- Include paper reference in experiment notes: `"[technique]. Source: arxiv:XXXX.XXXXX"`
+- Don't implement what you can't verify — if the paper is behind a paywall or the abstract is unclear, skip it.
+
+---
+
+## Curated Papers
+
+Pre-seeded reference list. Key takeaways already extracted — no need to re-fetch these.
+
+| Technique | Paper | Key finding |
+|---|---|---|
+| SwiGLU, RMSNorm, RoPE | LLaMA (Touvron et al. 2023) arxiv:2302.13971 | Replacing LayerNorm->RMSNorm, GELU->SwiGLU, learned PE->RoPE each improve perplexity |
+| FlashAttention | Dao et al. 2022 arxiv:2205.14135 | IO-aware attention, same result as standard, faster on GPU |
+| Scaling laws | Chinchilla (Hoffmann et al. 2022) arxiv:2203.15556 | Optimal tokens ~= 20x params; more data > bigger model for fixed compute |
+| Muon optimizer | Kosson et al. 2024 | SGD with Nesterov + orthogonalization; often beats AdamW on small models |
+| Sophia optimizer | Liu et al. 2023 arxiv:2305.14342 | Second-order optimizer; 2x faster than AdamW on LM tasks |
+| WSD schedule | Hu et al. 2024 arxiv:2405.18392 | Warmup-Stable-Decay outperforms cosine on LM pretraining |
+| ALiBi | Press et al. 2022 arxiv:2108.12409 | Bias-based positional encoding, no learned params, extrapolates well |
+| Grokking | Power et al. 2022 arxiv:2201.02177 | Long training beyond convergence can unlock generalization |
+| muP (maximal update param.) | Yang et al. 2022 arxiv:2203.03466 | Principled hyperparameter transfer across model sizes |
 
 ---
 

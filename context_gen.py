@@ -7,32 +7,32 @@ from datetime import datetime
 import db
 
 CONTEXT_PATH = os.path.join(os.path.dirname(__file__), "CONTEXT.md")
+NOTES_PATH   = os.path.join(os.path.dirname(__file__), "NOTES.md")
 
 # Ordered list of (display_name, tier, [name_keywords])
 # Keywords are checked against all experiment names (lowercase, space-joined)
 _TECHNIQUES = [
+    # Tier 1 — high impact (Flash Attention, SwiGLU already in baseline — omitted)
     ("Learning rate tuning",  1, ["lr_", "lr3", "lr6", "learning_rate"]),
-    ("Flash Attention",       1, ["flash", "sdpa"]),
-    ("SwiGLU",                1, ["swiglu"]),
     ("QK-Norm",               1, ["qk_norm", "qknorm"]),
     ("nGPT",                  1, ["ngpt", "normalized_gpt"]),
-    ("Depth/width tradeoff",  2, ["n_layer_", "n_embd_", "deeper", "wider", "layer_"]),
-    ("RoPE",                  2, ["rope", "rotary"]),
-    ("GQA",                   2, ["gqa", "kv_head"]),
+    # Tier 2 — medium (RoPE, GQA/MQA, WSD already in baseline — omitted)
+    ("Depth/width tradeoff",  2, ["n_layer_", "n_embd_", "embd_", "deeper", "wider", "layer_"]),
     ("Warmup tuning",         2, ["warmup"]),
     ("Batch size",            2, ["batch_", "bs_", "bsz"]),
     ("SWA",                   2, ["swa", "weight_avg", "ema_weights"]),
     ("Trapezoidal LR",        2, ["trapezoid", "trapezoidal"]),
     ("Higher LR",             2, ["higher_lr", "lr_2e3", "lr_3e3"]),
+    # Tier 3 — lower
     ("Bias terms",            3, ["_bias"]),
     ("Dropout",               3, ["dropout", "drop_"]),
     ("Weight decay",          3, ["weight_decay", "wd_"]),
-    ("Block size",            3, ["block_size", "ctx_", "seq_"]),
+    ("Block size",            3, ["block_size", "block_", "ctx_", "seq_"]),
     ("AdamW beta2",           3, ["beta2", "b2_"]),
     ("Gradient clipping",     3, ["grad_clip", "clip_", "no_clip", "clip_off", "clip_none", "clip_1", "clip_5"]),
     ("Post-norm",             3, ["post_norm", "postnorm"]),
+    # Tier 4 — literature / ambitious
     ("Muon optimizer",        4, ["muon"]),
-    ("WSD schedule",          4, ["wsd"]),
     ("Peri-LN",               4, ["peri", "peri_ln"]),
 ]
 
@@ -135,6 +135,13 @@ def generate():
 - Total experiments: {total}  |  Kept (improvements): {kept_count} ({pct})
 - Initial baseline loss: {baseline_str}  |  Best so far: {best_str}  |  Improvement: {improvement_str}
 """
+
+    # Append agent-written notes if they exist (survives regeneration)
+    if os.path.exists(NOTES_PATH):
+        with open(NOTES_PATH, "r", encoding="utf-8") as f:
+            notes = f.read().strip()
+        if notes:
+            content += f"\n---\n\n{notes}\n"
 
     with open(CONTEXT_PATH, "w", encoding="utf-8") as f:
         f.write(content)

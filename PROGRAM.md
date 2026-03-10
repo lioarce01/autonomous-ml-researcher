@@ -63,15 +63,20 @@ Repeat forever until `.pause` exists:
    - **NaN or loss > 10**: training completed but result is degenerate → treat as crash.
    - **Early abort** (optional): If at the first eval checkpoint (iter 250) val_loss has not dropped at all from the previous experiment's starting loss, or if loss is rising — abort with Ctrl+C, revert train.py, and log as a crash. Do not waste the remaining 4 minutes on a clearly broken config.
 8. **Log the result**: `uv run python log_result.py --name "NAME" --val_loss X.XXXXXX --notes "NOTES" --hypothesis "HYPOTHESIS"`
-8.5. **Write verdict**: Before moving to the next experiment, explicitly state:
-   - Was your hypothesis CONFIRMED (improvement as predicted), FALSIFIED (worse or no change), or INCONCLUSIVE (crash/NaN)?
-   - Estimate HP sensitivity: HIGH (>0.01 val_loss delta), MEDIUM (0.005-0.01), LOW (<0.005).
-   - If FALSIFIED: note WHY — was the hypothesis wrong, or was implementation buggy?
-   Include this as a one-line note to yourself before step 1 of the next iteration.
-   This builds your mental model of what levers are effective.
+8.5. **Write verdict + update NOTES.md**:
+   - Was your hypothesis CONFIRMED, FALSIFIED, or INCONCLUSIVE?
+   - Estimate HP sensitivity: HIGH (>0.01 delta), MEDIUM (0.005-0.01), LOW (<0.005).
+   - Update `NOTES.md` for any of these triggers:
+     - Sensitivity changed (e.g. "LR went from MEDIUM to HIGH after this result") → update HP Sensitivity Map
+     - Every 5 experiments → rewrite the Current Mental Model section
+     - After a literature search → append findings to Research Findings section
+     - Discovered an implementation gotcha → append to Implementation Notes
+   - `NOTES.md` is appended verbatim to every CONTEXT.md regeneration, so what you write here
+     persists across all future experiments and is always visible at the top of your memory.
 9. **Commit**: run the exact `git commit` command printed by `log_result.py`.
 10. **State management**:
     - If `kept: YES` — this is your new base config. Keep `train.py` as-is for the next experiment.
+      Update the **Current Best Config** section in `NOTES.md` with the new val_loss and full hyperparameter values.
       Then check for **Adaptive Budget Extension** (see rule below).
     - If `kept: NO` — revert `train.py` to the last kept (best) config before starting the next experiment.
 11. **Pause check**: `uv run python -c "import os; print('PAUSED' if os.path.exists('.pause') else 'CONTINUE')"`
@@ -247,7 +252,7 @@ Do **not** edit these under any circumstances:
 | `data/` | Dataset files and DB |
 | `PROGRAM.md` | This file |
 
-You **may** create new files (e.g., helper modules imported by `train.py`) but keep them minimal.
+You **may** edit `NOTES.md` freely — it is your persistent research notebook and is the one file outside `train.py` you are expected to write to. You **may** also create new files (e.g., helper modules imported by `train.py`) but keep them minimal.
 
 ---
 
@@ -417,6 +422,7 @@ Use these query templates, substituting your specific topic:
 - Include paper reference in experiment notes: `"[technique]. Source: arxiv:XXXX.XXXXX"`
 - Don't implement what you can't verify — if the paper is behind a paywall or the abstract is unclear, skip it.
 - **Timebox**: Max 2 `WebSearch` calls and 1 `WebFetch` per literature check session. Stop after extracting one implementable technique. Do not browse multiple papers in a single session.
+- **Always write to NOTES.md** after a literature search: append to the Research Findings section with the technique name, source, key hyperparameters, and one-line implementation tip. This persists into all future CONTEXT.md regenerations.
 
 ---
 

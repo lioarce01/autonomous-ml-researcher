@@ -20,10 +20,10 @@ from torch.nn import functional as F
 # Hyperparameters — Claude Code edits these (and anything else)
 # ---------------------------------------------------------------------------
 BUDGET_SECONDS = 300        # wall-clock training budget
-BATCH_SIZE     = 16         # micro-batch size
-BLOCK_SIZE     = 128        # context length (tokens)
-N_EMBD         = 192        # embedding dimension
-N_HEAD         = 6          # number of attention heads
+BATCH_SIZE     = 64         # micro-batch size
+BLOCK_SIZE     = 256        # context length (tokens)
+N_EMBD         = 512        # embedding dimension
+N_HEAD         = 8          # number of attention heads
 N_KV_HEAD      = 1          # number of KV heads for GQA (must divide N_HEAD)
 N_LAYER        = 6          # number of transformer blocks
 DROPOUT        = 0.0        # dropout (0.0 = off; good for small data)

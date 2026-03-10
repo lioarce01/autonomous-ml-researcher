@@ -14,7 +14,6 @@ _TECHNIQUES = [
     ("Learning rate tuning",  1, ["lr_", "lr3", "lr6", "learning_rate"]),
     ("Flash Attention",       1, ["flash", "sdpa"]),
     ("SwiGLU",                1, ["swiglu"]),
-    ("RMSNorm",               1, ["rmsnorm", "rms_norm"]),
     ("QK-Norm",               1, ["qk_norm", "qknorm"]),
     ("nGPT",                  1, ["ngpt", "normalized_gpt"]),
     ("Depth/width tradeoff",  2, ["n_layer_", "n_embd_", "deeper", "wider", "layer_"]),

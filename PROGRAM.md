@@ -255,7 +255,7 @@ You **may** create new files (e.g., helper modules imported by `train.py`) but k
 
 Roughly ordered by expected impact on a small character-level model. Work top-to-bottom, skipping anything already tried.
 
-Note: RoPE, Flash Attention, SwiGLU, WSD schedule, MQA, bfloat16, and TF32 flags are ALL already in train.py baseline. Do NOT experiment on these — they are the starting point.
+Note: RoPE, Flash Attention, SwiGLU, WSD schedule, MQA, RMSNorm, Logit soft-capping, bfloat16, and TF32 flags are ALL already in train.py baseline. Do NOT experiment on these — they are the starting point.
 
 ### Tier 1 — High Impact
 
@@ -274,18 +274,6 @@ optimizer = _MuonAdamW(
 ```
 Expected: same val_loss as AdamW in ~52% of FLOPs -> more iterations in 5 min.
 Source: Liu et al. 2025 arxiv:2502.16982
-
-**RMSNorm**
-Replace `nn.LayerNorm` in Block and GPT with RMSNorm (no mean subtraction, no bias):
-```python
-class RMSNorm(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.g = nn.Parameter(torch.ones(dim))
-    def forward(self, x):
-        return x / x.norm(2, dim=-1, keepdim=True) * (x.shape[-1] ** 0.5) * self.g
-```
-Replace all `nn.LayerNorm(n_embd)` calls with `RMSNorm(n_embd)`.
 
 **QK-Norm**
 Normalize Q and K vectors before the attention dot product. Stabilizes attention entropy,
@@ -309,8 +297,8 @@ Source: Loshchilov et al. 2024 arxiv:2410.01131 (ICLR 2025)
 ### Tier 2 — Medium Impact
 
 **Depth vs Width tradeoff**
-Current: N_LAYER=6, N_EMBD=512. Try deeper: N_LAYER=8, N_EMBD=512 (more params, check budget).
-Or wider: N_LAYER=4, N_EMBD=640 (more width, fewer layers). Keep total params < 50M.
+Current: N_LAYER=8, N_EMBD=512. Try deeper: N_LAYER=10 or 12 (more params, check budget).
+Or wider: N_LAYER=6, N_EMBD=640 (more width, fewer layers). Keep total params < 50M.
 
 **LR tuning**
 Current: LEARNING_RATE=1e-3. Try 3e-4 (more conservative) or 2e-3 (more aggressive with WSD).
@@ -363,7 +351,7 @@ In the SwiGLU MLP, replace F.silu with squared ReLU: `F.relu(x).pow(2)`.
 Current: DROPOUT=0.4. Try 0.3 (less regularization) or 0.5 (more).
 
 **Weight decay**
-Current: WEIGHT_DECAY=0.01. Try 0.1 (more) or 0.001 (less).
+Current: WEIGHT_DECAY=0.1. Try 0.01 (less) or 0.3 (more aggressive).
 
 **Block size**
 Current: BLOCK_SIZE=256. Try 512 (more context, fewer iters) or 128 (faster, more iters).
@@ -385,7 +373,7 @@ Current: bias=False throughout. Try adding bias=True to QKV and projection layer
 Attempt only after each component is in the CONTEXT.md leaderboard with kept=YES.
 
 **Bundle A**: Muon + WSD (already have WSD, just activate Muon)
-**Bundle B**: RMSNorm + Logit Soft-Capping + higher LR
+**Bundle B**: QK-Norm + higher LR (QK-Norm stabilizes attention, enabling the LR push)
 **Bundle C**: All kept individual improvements combined
 
 ---

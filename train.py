@@ -28,7 +28,7 @@ N_LAYER        = 6          # number of transformer blocks
 DROPOUT        = 0.0        # dropout (0.0 = off; good for small data)
 LEARNING_RATE  = 1e-3       # peak learning rate
 MIN_LR         = 1e-4       # minimum LR (cosine decay floor)
-WEIGHT_DECAY   = 0.1
+WEIGHT_DECAY   = 0.01
 GRAD_CLIP      = 1.0
 WARMUP_ITERS   = 100        # LR warmup steps
 EVAL_INTERVAL  = 250        # evaluate every N iters

@@ -69,6 +69,24 @@ def get_batch(data: list[int], batch_size: int, block_size: int):
 # Model
 # ---------------------------------------------------------------------------
 
+def _build_rope(seq_len, head_dim, device):
+    theta = 1.0 / (10000.0 ** (torch.arange(0, head_dim, 2, device=device).float() / head_dim))
+    pos = torch.arange(seq_len, device=device).float()
+    freqs = torch.outer(pos, theta)
+    cos = torch.cat([freqs.cos(), freqs.cos()], dim=-1)
+    sin = torch.cat([freqs.sin(), freqs.sin()], dim=-1)
+    return cos, sin
+
+
+def _rotate_half(x):
+    x1, x2 = x.chunk(2, dim=-1)
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def _apply_rope(x, cos, sin):
+    return x * cos.unsqueeze(0).unsqueeze(0) + _rotate_half(x) * sin.unsqueeze(0).unsqueeze(0)
+
+
 class CausalSelfAttention(nn.Module):
     def __init__(self, n_embd, n_head, block_size, dropout):
         super().__init__()
@@ -87,6 +105,10 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
 
+        head_dim = C // self.n_head
+        cos, sin = _build_rope(T, head_dim, x.device)
+        q = _apply_rope(q, cos, sin)
+        k = _apply_rope(k, cos, sin)
         y = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         return self.resid_drop(self.c_proj(y))
@@ -125,7 +147,6 @@ class GPT(nn.Module):
         self.block_size = block_size
         self.transformer = nn.ModuleDict(dict(
             wte=nn.Embedding(vocab_size, n_embd),
-            wpe=nn.Embedding(block_size, n_embd),
             drop=nn.Dropout(dropout),
             h=nn.ModuleList([Block(n_embd, n_head, block_size, dropout) for _ in range(n_layer)]),
             ln_f=nn.LayerNorm(n_embd),
@@ -151,8 +172,7 @@ class GPT(nn.Module):
 
     def forward(self, idx, targets=None):
         B, T = idx.size()
-        pos = torch.arange(T, dtype=torch.long, device=idx.device)
-        x = self.transformer.drop(self.transformer.wte(idx) + self.transformer.wpe(pos))
+        x = self.transformer.drop(self.transformer.wte(idx))
         for block in self.transformer.h:
             x = block(x)
         x = self.transformer.ln_f(x)

@@ -9,22 +9,33 @@ You are an ML research agent running inside Claude Code. Your environment is a d
 **Task**: Character-level language modeling on TinyShakespeare (~1M chars, 65-char vocab).
 **Budget**: 5 minutes wall-clock per experiment (`BUDGET_SECONDS = 300` in `train.py`).
 **Metric**: `val_loss` (cross-entropy, lower is better). Log to 6 decimal places.
-**Baseline model**: ~8M parameters (N_EMBD=512, N_HEAD=8, N_LAYER=6, BLOCK_SIZE=256, BATCH_SIZE=64).
-**Val loss scale** (GPU, ~2500+ iters):
-- First run (baseline config): ~1.45–1.55
-- Meaningful improvement: ~1.20–1.40
-- Strong result: ~1.05–1.20
-- Exceptional: < 1.05
+**Baseline model**: ~16M parameters (N_EMBD=512, N_HEAD=8, N_KV_HEAD=1 (MQA), N_LAYER=6,
+BLOCK_SIZE=256, BATCH_SIZE=128, DROPOUT=0.4).
 
-**GPU setup (add to top of train.py once, keep across experiments)**:
-```python
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
-torch.set_float32_matmul_precision('medium')
-```
-These are free speedup on Blackwell (RTX 5070) — enable them in the baseline run and never remove them.
+**Baseline architecture** (already in train.py — do NOT re-experiment on these):
+- RoPE positional encoding (applied to q, k in attention)
+- Flash Attention via F.scaled_dot_product_attention
+- SwiGLU MLP (gate x up with SiLU, hidden = 2/3 x 4 x n_embd)
+- WSD learning rate schedule (warmup-stable-decay)
+- MQA (N_KV_HEAD=1)
+- bfloat16 autocast + TF32 flags
+
+**Val loss scale** (starting from current best of 1.462):
+- Current best: 1.462 (batch128 + dropout_04 validated)
+- Meaningful improvement: < 1.43
+- Strong result: < 1.30
+- Exceptional: < 1.15
 
 **Device**: GPU. Always train on GPU — `torch.cuda.is_available()` returns `True`. Models up to ~50M params fit within the 5-min budget.
+
+**Python environment**: Always use `uv run python` — never bare `python` or `python3`. The project uses a `.venv` managed by uv. Bare `python` resolves to the system interpreter which is missing dependencies (numpy, etc.) and will cause import errors.
+
+If `.venv` does not exist, create it and install all dependencies before doing anything else:
+```bash
+uv venv .venv
+uv pip install -r requirements.txt
+```
+After that, all commands use `uv run python` as normal.
 
 ---
 
@@ -33,6 +44,7 @@ These are free speedup on Blackwell (RTX 5070) — enable them in the baseline r
 Repeat forever until `.pause` exists:
 
 1. **Read `CONTEXT.md`** (if it exists) — internalize the leaderboard, recent failures, and current best. Skip this step only on the very first run.
+   Also verify that train.py hyperparameters match the baseline described in Environment & Key Numbers. If train.py has been left in a modified state from a failed experiment, revert it before proceeding.
 1.5. **Literature check (conditional)** — Run only when one of these is true:
    - (a) First run (no CONTEXT.md) — survey state of the art before starting.
    - (b) Failure streak of 3+ — need fresh ideas from outside the Exploration Guide.
@@ -66,6 +78,22 @@ Repeat forever until `.pause` exists:
 - Never wait for human feedback.
 - Never stop between experiments.
 - The only valid stopping conditions are: `.pause` file exists, or an unrecoverable system error.
+
+### Always Use the venv
+Every Python command must use `uv run python`. Never use bare `python` or `python3`. The system Python is missing required packages and will fail.
+
+### Do Not Use torch.compile
+`torch.compile` requires Triton, which is not available on Windows. Do not add it to `train.py` — it will crash immediately.
+
+### Websearch Before Implementing Unfamiliar Techniques
+If you are not fully confident in the exact implementation of a technique (correct formula,
+key hyperparameters, code structure), you MUST websearch before writing any code:
+1. WebSearch: "[technique name] pytorch implementation"
+2. Find a reference implementation or paper abstract
+3. Extract the exact implementation details, then code it
+
+Never guess at implementation details. A wrong implementation wastes an entire 5-minute budget
+and produces a misleading result in the DB. When in doubt, search first.
 
 ### One Change Per Experiment
 Change exactly one thing per experiment. This isolates variables so you know what works. Do not combine multiple changes unless CONTEXT.md shows you have already validated each component individually and you are now testing their combination as a deliberate next step.
@@ -175,33 +203,28 @@ You **may** create new files (e.g., helper modules imported by `train.py`) but k
 
 Roughly ordered by expected impact on a small character-level model. Work top-to-bottom, skipping anything already tried.
 
-### Tier 0 — Free GPU Speedups (add once, never remove)
+Note: RoPE, Flash Attention, SwiGLU, WSD schedule, MQA, bfloat16, and TF32 flags are ALL already in train.py baseline. Do NOT experiment on these — they are the starting point.
 
-These go in train.py once during the baseline run. They are not experiments — they are setup. Add them after the `device` line:
+### Tier 1 — High Impact
 
+**Activate Muon optimizer** [HIGHEST PRIORITY]
+The Muon class is already implemented in train.py (see `_MuonAdamW`) but the training
+loop uses plain AdamW. To activate it, replace the optimizer setup in `main()`:
 ```python
-torch.backends.cuda.matmul.allow_tf32 = True   # enables TF32 on matmuls
-torch.backends.cudnn.allow_tf32 = True
-torch.set_float32_matmul_precision('medium')
+matrix_params = [p for p in model.parameters() if p.dim() >= 2]
+scalar_params  = [p for p in model.parameters() if p.dim() < 2]
+optimizer = _MuonAdamW(
+    matrix_params, scalar_params,
+    muon_lr=0.02, muon_momentum=0.95,
+    adam_lr=LEARNING_RATE, adam_betas=(0.9, 0.99), adam_wd=WEIGHT_DECAY
+)
+# Update LR in the loop: replace param_group loop with optimizer.set_lr(lr / LEARNING_RATE)
 ```
-
-### Tier 1 — High Impact (try these first)
-
-**Learning rate tuning**
-Baseline is `LEARNING_RATE=1e-3`. Try `3e-4`, `6e-4`, `3e-3`. This is the single highest-leverage knob.
-
-**Flash Attention**
-Replace the manual attention computation in `CausalSelfAttention.forward()` with:
-```python
-y = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
-```
-Remove the manual `att` computation and the `self.bias` buffer. Requires PyTorch ≥ 2.0. Faster + often slightly better due to numerical precision.
-
-**SwiGLU activation**
-Replace `nn.GELU()` + two-layer MLP with SwiGLU: `x * F.sigmoid(β * x)` gating. The hidden dimension in SwiGLU is typically `int(2/3 * 4 * n_embd)` (to keep param count similar). This is a well-validated improvement.
+Expected: same val_loss as AdamW in ~52% of FLOPs -> more iterations in 5 min.
+Source: Liu et al. 2025 arxiv:2502.16982
 
 **RMSNorm**
-Replace `nn.LayerNorm` with RMSNorm (no mean subtraction, no bias):
+Replace `nn.LayerNorm` in Block and GPT with RMSNorm (no mean subtraction, no bias):
 ```python
 class RMSNorm(nn.Module):
     def __init__(self, dim):
@@ -210,107 +233,62 @@ class RMSNorm(nn.Module):
     def forward(self, x):
         return x / x.norm(2, dim=-1, keepdim=True) * (x.shape[-1] ** 0.5) * self.g
 ```
-
-**torch.compile**
-Add `model = torch.compile(model)` after `model.to(device)`. PyTorch 2.x traces the computation graph and fuses ops. First iteration is slow (tracing); subsequent iters are 10-20% faster. Use `mode='reduce-overhead'` for small models.
-Constraint: adds ~30s overhead on first iter — account for this in budget.
+Replace all `nn.LayerNorm(n_embd)` calls with `RMSNorm(n_embd)`.
 
 **Logit Soft-Capping**
-In `GPT.forward()`, before computing loss, clamp logits:
+In `GPT.forward()`, before computing loss:
 ```python
 logits = 30.0 * torch.tanh(logits / 30.0)
 ```
-This bounds logits to [-30, 30] via a smooth taper. Prevents attention entropy collapse and training instability at higher LRs. Adopted by Gemma 2. Allows training at 1.5-2x higher LR than without capping. Try cap values: 30, 50.
+Prevents attention entropy collapse; allows higher LR. Adopted by Gemma 2. Try cap 30 or 50.
 
 ### Tier 2 — Medium Impact
 
 **Depth vs Width tradeoff**
-Current: N_LAYER=6, N_EMBD=384. Try: N_LAYER=8, N_EMBD=384 (deeper) or N_LAYER=4, N_EMBD=512 (wider). Keep total params similar.
+Current: N_LAYER=6, N_EMBD=512. Try deeper: N_LAYER=8, N_EMBD=512 (more params, check budget).
+Or wider: N_LAYER=4, N_EMBD=640 (more width, fewer layers). Keep total params < 50M.
 
-**RoPE positional encoding**
-Replace learned `wpe` embeddings with Rotary Position Embeddings. Must remove `+ self.transformer.wpe(pos)` from forward and apply rotations to q, k inside attention. Reference: Su et al. 2021.
-Constraint: `N_EMBD // N_HEAD` must be even.
+**LR tuning**
+Current: LEARNING_RATE=1e-3. Try 3e-4 (more conservative) or 2e-3 (more aggressive with WSD).
+WSD schedule tolerates higher peak LR than cosine — explore the upper end.
 
-**Grouped-Query Attention (GQA)**
-Reduce KV heads to `N_HEAD // 2` or `N_HEAD // 3`. Saves memory, sometimes better generalization.
-Constraint: `n_kv_heads` must divide `N_HEAD`.
+**Warmup tuning**
+Current: WARMUP_ITERS=100. Try 200 or 50. Affects how quickly LR reaches peak.
 
-**WSD (Warmup-Stable-Decay) Schedule**
-Replace the current cosine schedule in `get_lr()` with three phases:
-- Warmup: 0 → LEARNING_RATE over WARMUP_ITERS
-- Stable: hold at LEARNING_RATE for ~80% of budget
-- Decay: LEARNING_RATE → MIN_LR over final ~10% of budget
+**Logit Soft-Capping + higher LR** (after soft-capping validated)
+Once capping is validated, try pushing LEARNING_RATE to 2e-3 or 3e-3. Capping prevents
+the instability that normally limits LR.
 
-```python
-def get_lr(it, max_iters):
-    warmup_end = WARMUP_ITERS
-    decay_start = int(max_iters * 0.90)
-    if it < warmup_end:
-        return LEARNING_RATE * it / warmup_end
-    if it < decay_start:
-        return LEARNING_RATE
-    decay_ratio = (it - decay_start) / (max_iters - decay_start)
-    return MIN_LR + (LEARNING_RATE - MIN_LR) * (1 - decay_ratio)
-```
-Proven to beat cosine decay; adopted by DeepSeek-V3, ERNIE 4.5. Loss drops noticeably in the decay phase even after a flat stable phase — don't abort early.
+### Tier 3 — Lower Impact
 
-**ReLU² activation**
-Replace `F.silu` in the SwiGLU MLP with squared ReLU: `F.relu(x).pow(2)`.
-Simple change, measurably faster convergence than GELU or SiLU. Only test after SwiGLU is validated — swap just the activation function inside the gate.
-
-**Muon optimizer**
-Apply orthogonalized momentum to all 2D weight matrices (attention + MLP weights). Keep AdamW for 1D params (norms, embeddings, biases).
-```python
-# muon.py -- create this file, import in train.py
-# Reference: https://github.com/KellerJordan/Muon
-```
-Use `N_STEPS_NEWTON_SCHULZ = 5`. Achieves same val_loss as AdamW in ~52% of the FLOPs (1.35x wall-clock speedup on small transformers). Overhead: ~0.7% per step.
-Requires creating `muon.py` as a helper file.
-Source: Liu et al. 2025 arxiv:2502.16982
-
-**Warmup + cosine schedule tuning**
-Try `WARMUP_ITERS=200` or `500`. Try `MIN_LR = LEARNING_RATE / 10` (already set) vs `MIN_LR = 0`.
-
-**Batch size**
-Try `BATCH_SIZE=32` (smaller, noisier, sometimes better generalization) or `128` (larger, more stable). Pair with LR scaling (LR ∝ sqrt(batch_size) is a common heuristic).
-
-### Tier 3 — Lower Impact / Architectural Experiments
-
-**Bias terms**
-Current: `bias=False` throughout. Try adding biases back to QKV and projection layers.
+**ReLU2 activation** (only after Muon validated)
+In the SwiGLU MLP, replace F.silu with squared ReLU: `F.relu(x).pow(2)`.
 
 **Dropout**
-Current: `DROPOUT=0.0`. Try `0.1` or `0.2` — may help on this small dataset.
+Current: DROPOUT=0.4. Try 0.3 (less regularization) or 0.5 (more).
 
 **Weight decay**
-Current: `WEIGHT_DECAY=0.1`. Try `0.01`, `0.1`, `1.0`.
+Current: WEIGHT_DECAY=0.01. Try 0.1 (more) or 0.001 (less).
 
 **Block size**
-Current: `BLOCK_SIZE=256`. Try `128` (faster, more iters per budget) or `512` (more context, slower).
+Current: BLOCK_SIZE=256. Try 512 (more context, fewer iters) or 128 (faster, more iters).
 
-**AdamW β₂**
-Current: `0.95`. Try `0.99` (standard) — can stabilize training on small datasets.
+**AdamW beta2**
+Current: beta2=0.99. Try 0.95 if training is noisy.
 
 **Gradient clipping**
-Current: `GRAD_CLIP=1.0`. Try `0.5` (tighter) or `5.0` (looser).
+Current: GRAD_CLIP=0.5. Try 1.0 (looser) or 0.25 (tighter).
 
-**Pre-norm vs Post-norm**
-Current: pre-norm (LN before attention/MLP). Try post-norm (LN after residual add). Pre-norm is usually better but worth testing.
+**Bias terms**
+Current: bias=False throughout. Try adding bias=True to QKV and projection layers.
 
 ### Tier 4 — Combination Experiments
 
-Attempt only after each component is in the CONTEXT.md leaderboard with kept=YES. Order by proven synergy:
+Attempt only after each component is in the CONTEXT.md leaderboard with kept=YES.
 
-**Bundle A — Modern architecture stack** (try together as one experiment):
-RoPE + RMSNorm + SwiGLU. These three are designed to work together and have interacting benefits (RMSNorm stabilizes RoPE dot-products; SwiGLU plays well with pre-norm). Testing them together is valid if each was individually validated.
-
-**Bundle B — Optimizer + schedule**:
-Muon + WSD schedule. The WSD stable phase benefits from Muon's orthogonalization.
-
-**Bundle C — Stability stack**:
-Logit soft-capping + higher LR. If capping was validated, try pushing LR up (e.g., 2x the best LR found so far) as capping allows it.
-
-**Final config**: All validated components from A + B + C combined.
+**Bundle A**: Muon + WSD (already have WSD, just activate Muon)
+**Bundle B**: RMSNorm + Logit Soft-Capping + higher LR
+**Bundle C**: All kept individual improvements combined
 
 ---
 
@@ -391,7 +369,8 @@ After running, `log_result.py` will:
 ## Getting Started (First Run Only)
 
 If `CONTEXT.md` does not exist, this is your first run:
-1. `uv run python train.py` — run the default config (~5 min)
-2. `uv run python log_result.py --name "baseline" --val_loss X.XXXXXX --notes "Default config. N_LAYER=6, N_EMBD=512, N_HEAD=8, BATCH_SIZE=64, LR=1e-3."`
-3. Run the suggested git commit.
-4. Begin the research loop from step 1.
+1. **Check venv**: if `.venv` does not exist, run `uv venv .venv && uv pip install -r requirements.txt` first.
+2. `uv run python train.py` — run the default config (~5 min)
+3. `uv run python log_result.py --name "baseline" --val_loss X.XXXXXX --notes "Baseline: RoPE+Flash+SwiGLU+MQA+WSD+DROPOUT=0.4+BATCH=128, AdamW LR=1e-3."`
+4. Run the suggested git commit.
+5. Begin the research loop from step 1.

@@ -42,6 +42,10 @@ INPUT_BIN = os.path.join(DATA_DIR, "input.bin")
 device = "cuda" if torch.cuda.is_available() else "cpu"
 dtype = torch.bfloat16 if (device == "cuda" and torch.cuda.is_bf16_supported()) else torch.float32
 
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.set_float32_matmul_precision('medium')
+
 
 # ---------------------------------------------------------------------------
 # Data loading
@@ -200,13 +204,14 @@ class GPT(nn.Module):
 # ---------------------------------------------------------------------------
 
 def get_lr(it: int, max_iters: int) -> float:
+    # WSD: Warmup-Stable-Decay (Hu et al. 2024, arxiv:2405.18392)
+    decay_start = int(max_iters * 0.90)
     if it < WARMUP_ITERS:
         return LEARNING_RATE * it / WARMUP_ITERS
-    if it > max_iters:
-        return MIN_LR
-    decay_ratio = (it - WARMUP_ITERS) / (max_iters - WARMUP_ITERS)
-    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
-    return MIN_LR + coeff * (LEARNING_RATE - MIN_LR)
+    if it < decay_start:
+        return LEARNING_RATE
+    decay_ratio = (it - decay_start) / max(max_iters - decay_start, 1)
+    return MIN_LR + (LEARNING_RATE - MIN_LR) * (1.0 - decay_ratio)
 
 
 # ---------------------------------------------------------------------------
@@ -313,7 +318,7 @@ def main():
     model = GPT(vocab_size, N_EMBD, N_HEAD, N_KV_HEAD, N_LAYER, BLOCK_SIZE, DROPOUT).to(device)
     print(f"Parameters: {model.num_params()/1e6:.2f}M")
 
-    # Optimizer — separate weight decay for tensors ≥ 2D
+    # Optimizer — separate weight decay for tensors >= 2D
     decay_params = [p for p in model.parameters() if p.dim() >= 2]
     nodecay_params = [p for p in model.parameters() if p.dim() < 2]
     optimizer = torch.optim.AdamW(

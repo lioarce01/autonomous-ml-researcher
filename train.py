@@ -78,12 +78,7 @@ class CausalSelfAttention(nn.Module):
         self.dropout = dropout
         self.c_attn = nn.Linear(n_embd, 3 * n_embd, bias=False)
         self.c_proj = nn.Linear(n_embd, n_embd, bias=False)
-        self.attn_drop = nn.Dropout(dropout)
         self.resid_drop = nn.Dropout(dropout)
-        self.register_buffer(
-            "bias",
-            torch.tril(torch.ones(block_size, block_size)).view(1, 1, block_size, block_size),
-        )
 
     def forward(self, x):
         B, T, C = x.size()
@@ -92,11 +87,7 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
 
-        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-        att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf"))
-        att = F.softmax(att, dim=-1)
-        att = self.attn_drop(att)
-        y = att @ v
+        y = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         return self.resid_drop(self.c_proj(y))
 

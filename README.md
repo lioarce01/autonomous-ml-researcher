@@ -68,8 +68,13 @@ uv pip install -r requirements.txt
 # Download and tokenize the dataset (one time)
 uv run python prepare.py
 
-# Terminal 1 — start the agent
-claude --dangerously-skip-permissions
+# Terminal 1 — start any agentic tool pointed at this directory
+claude --dangerously-skip-permissions   # Claude Code
+# codex                                 # OpenAI Codex CLI
+# cursor                                # Cursor agent mode
+# opencode                              # OpenCode
+# gemini                                # Gemini CLI
+# ... any tool that can read files, run shell commands, and loop
 
 # Terminal 2 — live dashboard (optional)
 streamlit run dashboard.py    # → http://localhost:8501
@@ -85,6 +90,7 @@ rm .pause           # resume
 
 ## Design principles
 
+- **Agent-agnostic** — works with any tool that can read files and run shell commands: Claude Code, Codex CLI, Cursor, OpenCode, Gemini CLI, or anything equivalent.
 - **No magic dependencies** — stdlib + torch + streamlit only. No LangGraph, MLflow, ChromaDB, Optuna.
 - **One change per experiment** — strict rule enforced by PROGRAM.md. Causality over speed.
 - **Hypothesis tracking** — every experiment logs a prediction; the agent reflects on what was confirmed or falsified to build a sensitivity model over time.

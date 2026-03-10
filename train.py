@@ -104,15 +104,14 @@ class CausalSelfAttention(nn.Module):
 class MLP(nn.Module):
     def __init__(self, n_embd, dropout):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(n_embd, 4 * n_embd, bias=False),
-            nn.GELU(),
-            nn.Linear(4 * n_embd, n_embd, bias=False),
-            nn.Dropout(dropout),
-        )
+        hidden = int(2 / 3 * 4 * n_embd)  # keep param count same as 2-layer GELU MLP
+        self.gate = nn.Linear(n_embd, hidden, bias=False)
+        self.up   = nn.Linear(n_embd, hidden, bias=False)
+        self.down = nn.Linear(hidden, n_embd, bias=False)
+        self.drop = nn.Dropout(dropout)
 
     def forward(self, x):
-        return self.net(x)
+        return self.drop(self.down(F.silu(self.gate(x)) * self.up(x)))
 
 
 class Block(nn.Module):

@@ -50,10 +50,9 @@ _No findings logged yet. Add after first literature search._
 
 Technique-specific tips discovered during experiments or research.
 
-- **SWA**: init swa_model=None before training loop; deepcopy at 80% mark; evaluate swa_model at end
-- **QK-Norm**: apply after q/k linear projection, before RoPE; epsilon 1e-6; may allow 1.5-2x LR
-- **Muon**: ACTIVE in baseline. Uses set_lr(ratio) for LR schedule, not param_group loop. muon_lr=0.02 is separate from LEARNING_RATE. If reverting to AdamW for any experiment, restore the param_group loop.
-- **val_bpb**: metric = val_loss_nats / (avg_bytes_per_token * ln(2)). avg_bytes_per_token loaded from data/meta.json. BPE vocab=8192 gives ~3-4 bytes/token on English text.
+- **SWA**: init swa_model=None before training loop; deepcopy at 80% mark; evaluate swa_model at end.
+- **QK-Norm**: IN BASELINE. Enables pushing LR 1.5-2x higher safely — try LR=2e-3 or 3e-3 as first experiment.
+- **Muon**: ACTIVE in baseline. set_lr(ratio) scales both Muon LR and AdamW per-group LRs proportionally. muon_lr=0.02 is independent of LEARNING_RATE. Embed group gets LR*EMBED_LR_MULT=3.0.
 
 ---
 

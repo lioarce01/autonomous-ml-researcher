@@ -40,14 +40,7 @@ BLOCK_SIZE=256, BATCH_SIZE=128, DROPOUT=0.2, WARMUP_ITERS=200, WEIGHT_DECAY=0.1,
 
 **Device**: GPU. Always train on GPU — `torch.cuda.is_available()` returns `True`. Models up to ~50M params fit within the 5-min budget.
 
-**Python environment**: Always use `uv run python` — never bare `python` or `python3`. The project uses a `.venv` managed by uv. Bare `python` resolves to the system interpreter which is missing dependencies (numpy, etc.) and will cause import errors.
-
-If `.venv` does not exist, create it and install all dependencies before doing anything else:
-```bash
-uv venv .venv
-uv pip install -r requirements.txt
-```
-After that, all commands use `uv run python` as normal.
+**Python environment**: Always `uv run python`. If `.venv` missing: `uv venv .venv && uv pip install -r requirements.txt`.
 
 ---
 
@@ -66,7 +59,7 @@ Repeat forever until `.pause` exists:
    - (d) About to implement a technique not in the Exploration Guide — verify implementation details.
    See the **Literature Research** section below for how to search.
    **Cap**: max 2 WebSearch + 1 WebFetch per check session. Extract one technique and stop.
-2. **Form a hypothesis** — one specific change. Write it out mentally: *"I will change X from A to B because this should reduce val_loss by approximately Y due to Z."*
+2. **Form a hypothesis** — one specific change. Write it out mentally: *"I will change X from A to B because this should reduce val_bpb by approximately Y due to Z."*
 3. **Plan the revert** — note the current values you are about to change, so you can restore them exactly if the experiment fails.
 4. **Edit `train.py`** — make exactly one meaningful change.
 5. **Verify the output contract** — confirm `train.py` still contains the line `print(f"val_bpb: {val_bpb:.6f}")`. Do not remove or alter this line.
@@ -98,24 +91,9 @@ Repeat forever until `.pause` exists:
    - `[FRAG]` — peak_reserved > peak_alloc * 1.8 (excessive fragmentation; PyTorch holding unused cache)
    - `[SPIKE]` — peak_alloc > 2× first_eval_alloc (sudden large allocation mid-run)
 
-   Detection logic (read from grep output):
-   - **first_eval_alloc**: the alloc value from the first `| mem X.XX/Y.YY` eval line
-   - **last_eval_alloc**: the alloc value from the last `| mem X.XX/Y.YY` eval line
-   - **peak_alloc / peak_reserved**: from the `Peak VRAM: X.XXGB allocated | Y.YYgb reserved` line
-
-   If STATUS contains anything other than `OK`, also append a detail line:
-   ```
-   > [LEAK/FRAG/SPIKE] experiment_name: brief description of what was observed
-   ```
-   Example entry:
-   ```
-   | lr_2e3 | 0.44GB | 0.52GB | 0.19GB | 0.19GB | OK |
-   | ngpt_v1 | 1.21GB | 2.10GB | 0.19GB | 0.31GB | [LEAK][FRAG] |
-   > [LEAK] ngpt_v1: alloc grew 0.19→0.31GB across 680 iters
-   > [FRAG] ngpt_v1: reserved (2.10GB) is 1.7x allocated (1.21GB)
-   ```
-   `MEMORY_LOG.md` is append-only — never delete entries. The table lets you spot patterns
-   across experiments (e.g. a whole class of architectures leaking).
+   Parse: first/last `| mem X.XX/Y.YY` eval lines give first/last alloc; `Peak VRAM:` line gives peak.
+   For non-OK entries also append `> [CODE] name: one-line description`.
+   `MEMORY_LOG.md` is append-only — never delete entries.
 
 8. **Log the result**: `uv run python log_result.py --name "NAME" --val_bpb X.XXXXXX --notes "NOTES" --hypothesis "HYPOTHESIS"`
 8.5. **Write verdict + update NOTES.md**:
@@ -143,11 +121,11 @@ Repeat forever until `.pause` exists:
 ## Adaptive Budget Extension
 
 After a `kept: YES` result, check whether the model was still converging at the end of training.
-Look at the printed eval lines: find the last two val_loss values before the final eval.
+Look at the printed eval lines: find the last two val_bpb values before the final eval.
 
-**Extend if**: val_loss improved by > 0.005 per 100 iters during the last 20% of training.
+**Extend if**: val_bpb improved by > 0.005 per 100 iters during the last 20% of training.
 
-How to calculate: take the second-to-last eval val and the final val_loss, divide the drop by
+How to calculate: take the second-to-last eval val_bpb and the final val_bpb, divide the drop by
 the iter gap, scale to per-100-iter rate. Example: iter 750 val=1.493, final (iter 822) val=1.465
 → drop=0.028 over 72 iters → 0.039 per 100 iters → EXTEND (> 0.005 threshold).
 
@@ -202,13 +180,13 @@ Each experiment name must be unique. If you've already tried `lr_3e4`, name the 
 
 ### Naming Convention
 Short, descriptive, identifies the key change:
-- `baseline` — first run, default config
-- `lr_3e4` — learning rate changed to 3e-4
-- `n_layer_8` — N_LAYER increased to 8
-- `rope_pe` — RoPE positional encoding
-- `swiglu` — SwiGLU in MLP
-- `gqa_2kv` — GQA with 2 KV heads
-- `flash_attn` — Flash attention kernel
+- `baseline_v2` — first run, calibrate new dataset
+- `lr_2e3` — LEARNING_RATE changed to 2e-3
+- `warmdown_03` — WARMDOWN_FRAC changed to 0.3
+- `n_layer_10` — N_LAYER increased to 10
+- `n_embd_512` — wider model
+- `swa` — stochastic weight averaging
+- `ngpt_v1` — normalized transformer attempt
 
 ### Notes Format
 Always write notes as: *"Changed [X] from [A] to [B]. Hypothesis: [expected effect and reason]."*
@@ -219,14 +197,14 @@ Before attempting a Tier 4 combination experiment, verify that **each** componen
 
 ### Hyperparameter Sensitivity Map
 After every 5 experiments, mentally update your sensitivity model:
-- Which HPs have shown HIGH sensitivity (>0.01 val_loss delta when changed)?
+- Which HPs have shown HIGH sensitivity (>0.01 val_bpb delta when changed)?
 - Which are LOW sensitivity (<0.005 delta)?
 - Prioritize high-sensitivity dimensions for future experiments.
 - Stop experimenting on a dimension once you've run 3 trials with no improvement.
 Example mental model: "LR=HIGH, DROPOUT=MEDIUM, BLOCK_SIZE=LOW, N_LAYER=HIGH"
 
 ### Simplicity Criterion
-Given equal val_loss, prefer the simpler config: fewer parameters, less code, less memory. A 5M model at val_loss=1.30 beats a 15M model at val_loss=1.30.
+Given equal val_bpb, prefer the simpler config: fewer parameters, less code, less memory.
 
 ### Parameter Budget
 Up to ~50M params is fine on GPU within the 5-min budget. If training hasn't produced a meaningful eval by 4 minutes, the model is too large — reduce N_LAYER or N_EMBD.
@@ -240,26 +218,6 @@ If `train.py` crashes or produces NaN/degenerate loss:
 2. Revert `train.py` to the last known-good state (the config that produced the current best val_bpb in CONTEXT.md).
 3. Log a failure: `uv run python log_result.py --name "NAME_crash" --val_bpb 99.0 --notes "Crashed: [brief reason]. Reverted to [last best name]."`
 4. Continue to the next experiment. Do not retry the same crashed config.
-
----
-
-## Failure Streak Protocol
-
-After **3 consecutive non-improvements**:
-- Stop tuning the same dimension (e.g., stop trying LR variants).
-- Pivot to a different *type* of change:
-  - If last 3 were hyperparameters → try an architecture change
-  - If last 3 were architecture → try optimizer or schedule change
-  - If last 3 were optimizer/schedule → try a Tier 4 combination
-
-After **5 consecutive non-improvements**:
-- Re-read CONTEXT.md. Look at the Unexplored Techniques list.
-- Pick the highest-tier unexplored item and implement it.
-- If all Exploration Guide items are explored → trigger Literature Research.
-
-After **7 consecutive non-improvements**:
-- The current baseline architecture may have hit its ceiling.
-- Consider a full architecture reset: start from a clean config with the single most-validated improvement only, and rebuild from there.
 
 ---
 
@@ -279,20 +237,14 @@ Before picking the next experiment, apply this decision tree:
    → Yes: consider a Tier 4 combination of the best-performing kept experiments.
    → No: keep validating individual components.
 
-4. **Is the failure streak >= 3, OR is this the 5th/10th/15th experiment?**
-   → Trigger Literature Research (step 1.5). Extract one new technique.
-   → Add it to NOTES.md Research Findings and treat as new Tier 1 candidate.
-   → If all known tiers fully explored: move to Tier 5 (novel self-directed research).
+4. **Failure streak or periodic scan:**
+   - Streak 3: pivot type (HPs → architecture → optimizer/schedule → Tier 4).
+   - Streak 5 or every 5th experiment: trigger Literature Research (step 1.5), pick highest unexplored tier.
+   - Streak 7: architecture may have hit ceiling — consider reset to single best-validated change.
+   - All tiers exhausted: enter Tier 5 (free research mode, tag `[NOVEL]`).
 
-5. **Tier 5 — when to enter**:
-   → All Tier 1-3 items explored AND Tier 4 combinations tried AND literature search done.
-   → You are now in free research mode. Form your own hypothesis from first principles or
-      from patterns you observed across experiments. WebSearch to validate before implementing.
-   → Tag these experiments `[NOVEL]` in notes and log them whether they succeed or fail.
-
-**Key principle**: Alternate between architecture changes and hyperparameter sweeps. Never run
-two architecture changes back-to-back without re-optimizing LR in between — the optimal LR
-shifts when architecture changes.
+**Key principle**: Alternate architecture changes with hyperparameter sweeps. Never run two
+architecture changes back-to-back — the optimal LR shifts when architecture changes.
 
 ---
 
@@ -354,14 +306,9 @@ Also tune WARMDOWN_FRAC: 0.3 (shorter decay, more stable phase) vs 0.7 (longer d
 **Warmup tuning**
 Current: WARMUP_ITERS=200. Try 100 or 400. Affects how quickly LR reaches peak.
 
-**Higher LR (leveraging existing soft-capping)**
-Soft-capping (already in baseline) prevents attention entropy collapse and allows higher LR.
-Current LEARNING_RATE=1e-3. Try 2e-3 or 3e-3 — capping should prevent instability.
-Run this before LR tuning experiments to find the true upper bound.
-
 **Stochastic Weight Averaging (SWA)**
 In the last 20% of training, maintain a running EMA of model weights. Evaluate the
-averaged checkpoint instead of the final one for val_loss. ~5 lines of code:
+averaged checkpoint instead of the final one. ~5 lines of code:
 ```python
 # Add after optimizer step in the last 20% of training:
 if it > int(max_iters * 0.80):
@@ -431,13 +378,6 @@ surfaces a new technique, you are free to propose and implement ideas not on thi
 
 ## Literature Research
 
-### When to search
-Run a literature search in the same cases as step 1.5:
-- (a) First run — survey state of the art before starting.
-- (b) Every 5th experiment — periodic scan for recent work.
-- (c) Failure streak of 3+ — stuck and need ideas from outside the Exploration Guide.
-- (d) About to implement a technique not in the Exploration Guide — verify correct hyperparameters and implementation details first.
-
 ### How to search
 
 This agent has `WebSearch` and `WebFetch` tools. Use them like this:
@@ -467,9 +407,8 @@ Use these query templates, substituting your specific topic:
 
 - Extract exactly one implementable technique per search session.
 - Include paper reference in experiment notes: `"[technique]. Source: arxiv:XXXX.XXXXX"`
-- Don't implement what you can't verify — if the paper is behind a paywall or the abstract is unclear, skip it.
-- **Timebox**: Max 2 `WebSearch` calls and 1 `WebFetch` per literature check session. Stop after extracting one implementable technique. Do not browse multiple papers in a single session.
-- **Always write to NOTES.md** after a literature search: append to the Research Findings section with the technique name, source, key hyperparameters, and one-line implementation tip. This persists into all future CONTEXT.md regenerations.
+- Don't implement what you can't verify — if the paper is behind a paywall or abstract is unclear, skip it.
+- **Always write to NOTES.md** after a search: append technique name, source, key hyperparameters, one-line implementation tip to Research Findings.
 
 ---
 
@@ -488,7 +427,7 @@ Pre-seeded reference list. Key takeaways already extracted — no need to re-fet
 | Peri-LN | 2025 arxiv:2502.02732 | Apply LayerNorm both before AND after each sub-layer (not just pre-norm); adopted by Gemma and OLMo families |
 | ALiBi | Press et al. 2022 arxiv:2108.12409 | Bias-based positional encoding, no learned params, extrapolates to longer sequences |
 | Grokking | Power et al. 2022 arxiv:2201.02177 | Training well past apparent convergence can unlock generalization; don't stop too early |
-| QK-Norm + speedrun | nanoGPT speedrun worklog 2025-2026 | ReLU² + remove clip + QK-Norm bundle; all now in baseline except QK-Norm |
+| QK-Norm + speedrun | nanoGPT speedrun worklog 2025-2026 | ReLU² + remove clip + QK-Norm bundle; all now in baseline. QK-Norm enables pushing LR 1.5-2x higher. |
 | SWA weight averaging | arXiv:2502.06761 (Feb 2025) | EMA of weights in last 20% of training; free generalization; minimal code |
 
 ---
@@ -512,10 +451,10 @@ After running, `log_result.py` will:
 ## Getting Started (First Run Only)
 
 If `CONTEXT.md` does not exist, this is your first run:
-1. **Check venv**: if `.venv` does not exist, run `uv venv .venv && uv pip install -r requirements.txt` first.
-2. **Check data**: if `data/input.bin` does not exist, run `uv run python prepare.py` first (downloads FineWeb-Edu, trains BPE tokenizer, writes data/ with 16-byte header binary format).
-3. `uv run python train.py > run.log 2>&1` — run the default config (~5 min)
-4. `grep "val_bpb:" run.log` — read the result
-5. `uv run python log_result.py --name "baseline_v2" --val_bpb X.XXXXXX --notes "Baseline: RoPE+QKNorm+SSSL+FA3+ReGLU+Trap LR+PerParamLR+MQA+LogitCap15+RMSNorm+Muon+NoClip, N_EMBD=384 N_LAYER=8 DROPOUT=0.2 WD=0.1 LR=1e-3. FineWeb-Edu BPE vocab=8192."`
-4. Run the suggested git commit.
-5. Begin the research loop from step 1.
+1. **Check venv**: if `.venv` missing — `uv venv .venv && uv pip install -r requirements.txt`.
+2. **Check data**: if `data/input.bin` missing — `uv run python prepare.py` (downloads FineWeb-Edu, trains BPE, writes data/).
+3. `uv run python train.py > run.log 2>&1` — run the default config (~5 min).
+4. `grep "val_bpb:" run.log` — read the result.
+5. `uv run python log_result.py --name "baseline_v2" --val_bpb X.XXXXXX --notes "Baseline: RoPE+QKNorm+SSSL+FA3+ReGLU+TrapLR+PerParamLR+MQA+LogitCap15+RMSNorm+Muon, N_EMBD=384 N_LAYER=8 DROPOUT=0.2 LR=1e-3. FineWeb-Edu BPE vocab=8192."`
+6. Run the suggested git commit.
+7. Begin the research loop from step 1.

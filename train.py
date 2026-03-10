@@ -30,7 +30,7 @@ DROPOUT        = 0.0        # dropout (0.0 = off; good for small data)
 LEARNING_RATE  = 1e-3       # peak learning rate
 MIN_LR         = 1e-4       # minimum LR (cosine decay floor)
 WEIGHT_DECAY   = 0.01
-GRAD_CLIP      = 1.0
+GRAD_CLIP      = 0.5
 WARMUP_ITERS   = 100        # LR warmup steps
 EVAL_INTERVAL  = 250        # evaluate every N iters
 EVAL_ITERS     = 50         # batches used for each eval
@@ -221,7 +221,7 @@ def estimate_loss(model, train_data, val_data):
         split_losses = []
         for _ in range(EVAL_ITERS):
             x, y = get_batch(data, BATCH_SIZE, BLOCK_SIZE)
-            with torch.autocast(device_type=device, dtype=dtype):
+            with torch.autocast(device_type=device, dtype=dtype, enabled=(device == "cuda")):
                 _, loss = model(x, y)
             split_losses.append(loss.item())
         losses[split] = sum(split_losses) / len(split_losses)
@@ -280,7 +280,7 @@ def main():
             param_group["lr"] = lr
 
         x, y = get_batch(train_data, BATCH_SIZE, BLOCK_SIZE)
-        with torch.autocast(device_type=device, dtype=dtype):
+        with torch.autocast(device_type=device, dtype=dtype, enabled=(device == "cuda")):
             _, loss = model(x, y)
 
         optimizer.zero_grad(set_to_none=True)

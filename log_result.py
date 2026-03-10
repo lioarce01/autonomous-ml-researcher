@@ -2,7 +2,7 @@
 log_result.py — CLI for Claude Code to log experiment results.
 
 Usage:
-    python log_result.py --name "baseline" --val_loss 1.5 --notes "initial nanoGPT"
+    python log_result.py --name "baseline" --val_bpb 1.5 --notes "initial nanoGPT"
 """
 
 import argparse
@@ -28,13 +28,13 @@ def get_git_hash() -> str | None:
 def main():
     parser = argparse.ArgumentParser(description="Log an experiment result to the DB.")
     parser.add_argument("--name", required=True, help="Experiment name (short, descriptive)")
-    parser.add_argument("--val_loss", required=True, type=float, help="Validation loss")
+    parser.add_argument("--val_bpb", required=True, type=float, help="Validation bits per byte")
     parser.add_argument("--notes", default="", help="Short description of what changed")
     parser.add_argument("--hypothesis", default=None,
         help="What you predicted would happen and why (optional)")
     args = parser.parse_args()
 
-    row = db.log(args.name, args.val_loss, args.notes, hypothesis=args.hypothesis)
+    row = db.log(args.name, args.val_bpb, args.notes, hypothesis=args.hypothesis)
 
     git_hash = get_git_hash()
     if git_hash:
@@ -45,10 +45,10 @@ def main():
 
     kept_str = "YES" if row["kept"] else "NO"
     stats = db.get_stats()
-    best = stats["best_val_loss"]
+    best = stats["best_val_bpb"]
 
     print(f"\n[OK] Logged experiment #{row['id']}: {args.name}")
-    print(f"  Val loss : {args.val_loss:.6f}")
+    print(f"  Val bpb  : {args.val_bpb:.6f}")
     print(f"  Kept     : {kept_str}")
     print(f"  Best so far: {best:.6f}")
     if git_hash:
@@ -58,7 +58,7 @@ def main():
     # Suggested commit message
     action = "improve" if row["kept"] else "try"
     print(f"Suggested commit message:")
-    print(f'  git commit -am "exp: {action} {args.name} -- val_loss={args.val_loss:.4f}"')
+    print(f'  git commit -am "exp: {action} {args.name} -- val_bpb={args.val_bpb:.4f}"')
     print()
 
 

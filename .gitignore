@@ -1,8 +1,11 @@
 # ── Data & database (regenerated locally) ──────────────────────────────────
 data/input.txt
 data/input.bin
+data/val.bin
 data/vocab.txt
 data/experiments.db
+data/meta.json
+data/tokenizer.json
 
 # Keep the data/ directory itself in the repo
 !data/.gitkeep
@@ -45,8 +48,6 @@ secrets.json
 *.ckpt
 *.safetensors
 *.bin
-# Exception: keep tokenizer vocab files if ever added
-!tokenizer*.json
 
 # ── Jupyter ─────────────────────────────────────────────────────────────────
 .ipynb_checkpoints/
@@ -78,6 +79,9 @@ desktop.ini
 mlruns/
 wandb/
 lightning_logs/
+
+# ── HuggingFace cache ────────────────────────────────────────────────────────
+.cache/
 
 # ── Logs ────────────────────────────────────────────────────────────────────
 *.log

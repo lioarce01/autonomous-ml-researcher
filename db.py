@@ -12,7 +12,7 @@ DDL = """
 CREATE TABLE IF NOT EXISTS experiments (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     name        TEXT NOT NULL,
-    val_loss    REAL,
+    val_bpb     REAL,
     notes       TEXT,
     timestamp   TEXT NOT NULL DEFAULT (datetime('now')),
     kept        INTEGER NOT NULL DEFAULT 0,
@@ -36,18 +36,18 @@ def _connect():
     return conn
 
 
-def log(name: str, val_loss: float, notes: str = "", hypothesis: str = None) -> dict:
-    """Insert experiment. Sets kept=1 if this is a new best val_loss."""
+def log(name: str, val_bpb: float, notes: str = "", hypothesis: str = None) -> dict:
+    """Insert experiment. Sets kept=1 if this is a new best val_bpb."""
     conn = _connect()
     current_best = conn.execute(
-        "SELECT MIN(val_loss) as best FROM experiments WHERE kept = 1"
+        "SELECT MIN(val_bpb) as best FROM experiments WHERE kept = 1"
     ).fetchone()["best"]
 
-    kept = 1 if (current_best is None or val_loss < current_best) else 0
+    kept = 1 if (current_best is None or val_bpb < current_best) else 0
 
     cursor = conn.execute(
-        "INSERT INTO experiments (name, val_loss, notes, kept, hypothesis) VALUES (?, ?, ?, ?, ?)",
-        (name, val_loss, notes, kept, hypothesis),
+        "INSERT INTO experiments (name, val_bpb, notes, kept, hypothesis) VALUES (?, ?, ?, ?, ?)",
+        (name, val_bpb, notes, kept, hypothesis),
     )
     conn.commit()
     row_id = cursor.lastrowid
@@ -67,7 +67,7 @@ def update_git_hash(row_id: int, git_hash: str):
 def get_top(n: int = 5) -> list[dict]:
     conn = _connect()
     rows = conn.execute(
-        "SELECT * FROM experiments ORDER BY val_loss ASC LIMIT ?", (n,)
+        "SELECT * FROM experiments ORDER BY val_bpb ASC LIMIT ?", (n,)
     ).fetchall()
     result = [dict(r) for r in rows]
     conn.close()
@@ -105,7 +105,7 @@ def get_baseline() -> dict | None:
 def get_stats() -> dict:
     conn = _connect()
     row = conn.execute(
-        "SELECT COUNT(*) as total, SUM(kept) as kept_count, MIN(val_loss) as best_val_loss "
+        "SELECT COUNT(*) as total, SUM(kept) as kept_count, MIN(val_bpb) as best_val_bpb "
         "FROM experiments"
     ).fetchone()
     result = dict(row)

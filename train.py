@@ -1,13 +1,14 @@
 """
-train.py — nanoGPT on TinyShakespeare with a 5-minute wall-clock budget.
+train.py — nanoGPT on TinyStories with a 5-minute wall-clock budget.
 
-Claude Code is free to edit ANY part of this file to improve val_loss.
-After training completes, the script prints: val_loss: X.XXXXXX
+Claude Code is free to edit ANY part of this file to improve val_bpb.
+After training completes, the script prints: val_bpb: X.XXXXXX
 
 Key hyperparameters to tune (at the top for easy access):
 """
 
 import os
+import json
 import math
 import time
 import struct
@@ -30,14 +31,15 @@ DROPOUT        = 0.4        # dropout (regularize against memorization on GPU)
 LEARNING_RATE  = 1e-3       # peak learning rate
 MIN_LR         = 1e-4       # minimum LR (cosine decay floor)
 WEIGHT_DECAY   = 0.1
-GRAD_CLIP      = 0.5
 WARMUP_ITERS   = 200        # LR warmup steps
 EVAL_INTERVAL  = 250        # evaluate every N iters
 EVAL_ITERS     = 50         # batches used for each eval
 # ---------------------------------------------------------------------------
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+DATA_DIR  = os.path.join(os.path.dirname(__file__), "data")
 INPUT_BIN = os.path.join(DATA_DIR, "input.bin")
+VAL_BIN   = os.path.join(DATA_DIR, "val.bin")
+META_JSON = os.path.join(DATA_DIR, "meta.json")
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 dtype = torch.bfloat16 if (device == "cuda" and torch.cuda.is_bf16_supported()) else torch.float32
@@ -52,14 +54,24 @@ torch.set_float32_matmul_precision('medium')
 # ---------------------------------------------------------------------------
 
 def load_data():
-    if not os.path.exists(INPUT_BIN):
-        raise FileNotFoundError(
-            f"{INPUT_BIN} not found. Run `python prepare.py` first."
-        )
+    for path in (INPUT_BIN, VAL_BIN, META_JSON):
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"{path} not found. Run `python prepare.py` first.")
+
+    with open(META_JSON) as f:
+        meta = json.load(f)
+    vocab_size = meta["vocab_size"]
+    avg_bytes_per_token = meta["avg_bytes_per_token"]
+
     with open(INPUT_BIN, "rb") as f:
-        vocab_size, n_tokens = struct.unpack("<II", f.read(8))
-        tokens = list(struct.unpack(f"<{n_tokens}H", f.read(n_tokens * 2)))
-    return tokens, vocab_size
+        _, n_tokens = struct.unpack("<II", f.read(8))
+        train_tokens = list(struct.unpack(f"<{n_tokens}H", f.read(n_tokens * 2)))
+
+    with open(VAL_BIN, "rb") as f:
+        _, n_val = struct.unpack("<II", f.read(8))
+        val_tokens = list(struct.unpack(f"<{n_val}H", f.read(n_val * 2)))
+
+    return train_tokens, val_tokens, vocab_size, avg_bytes_per_token
 
 
 def get_batch(data: list[int], batch_size: int, block_size: int):
@@ -146,7 +158,7 @@ class MLP(nn.Module):
         self.drop = nn.Dropout(dropout)
 
     def forward(self, x):
-        return self.drop(self.down(F.silu(self.gate(x)) * self.up(x)))
+        return self.drop(self.down(F.relu(self.gate(x)).pow(2) * self.up(x)))
 
 
 class Block(nn.Module):
@@ -317,27 +329,20 @@ class _MuonAdamW:
 def main():
     print(f"Device: {device} | dtype: {dtype}")
 
-    tokens, vocab_size = load_data()
-    print(f"Dataset: {len(tokens):,} tokens | vocab size: {vocab_size}")
-
-    # Train/val split (90/10)
-    n = int(0.9 * len(tokens))
-    train_data = tokens[:n]
-    val_data = tokens[n:]
+    train_data, val_data, vocab_size, avg_bytes_per_token = load_data()
+    print(f"Dataset: {len(train_data):,} train tokens | {len(val_data):,} val tokens | vocab size: {vocab_size}")
 
     model = GPT(vocab_size, N_EMBD, N_HEAD, N_KV_HEAD, N_LAYER, BLOCK_SIZE, DROPOUT).to(device)
     print(f"Parameters: {model.num_params()/1e6:.2f}M")
 
-    # Optimizer — separate weight decay for tensors >= 2D
-    decay_params = [p for p in model.parameters() if p.dim() >= 2]
-    nodecay_params = [p for p in model.parameters() if p.dim() < 2]
-    optimizer = torch.optim.AdamW(
-        [
-            {"params": decay_params, "weight_decay": WEIGHT_DECAY},
-            {"params": nodecay_params, "weight_decay": 0.0},
-        ],
-        lr=LEARNING_RATE,
-        betas=(0.9, 0.99),
+    # Optimizer — Muon for matrix params, AdamW for 1D (norms, embeddings)
+    # Source: Liu et al. 2025 arxiv:2502.16982 — 40% fewer FLOPs than AdamW
+    matrix_params = [p for p in model.parameters() if p.dim() >= 2]
+    scalar_params  = [p for p in model.parameters() if p.dim() < 2]
+    optimizer = _MuonAdamW(
+        matrix_params, scalar_params,
+        muon_lr=0.02, muon_momentum=0.95,
+        adam_lr=LEARNING_RATE, adam_betas=(0.9, 0.99), adam_wd=WEIGHT_DECAY,
     )
 
     t0 = time.time()
@@ -357,8 +362,7 @@ def main():
         max_iters = iter_num + remaining_iters + 1
 
         lr = get_lr(iter_num, max_iters)
-        for param_group in optimizer.param_groups:
-            param_group["lr"] = lr
+        optimizer.set_lr(lr / LEARNING_RATE)
 
         x, y = get_batch(train_data, BATCH_SIZE, BLOCK_SIZE)
         with torch.autocast(device_type=device, dtype=dtype, enabled=(device == "cuda")):
@@ -366,15 +370,16 @@ def main():
 
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
         optimizer.step()
 
         if iter_num % EVAL_INTERVAL == 0:
             losses = estimate_loss(model, train_data, val_data)
+            val_bpb_mid = losses["val"] / (avg_bytes_per_token * math.log(2))
             elapsed_str = f"{time.time() - t0:.0f}s"
             print(
                 f"  iter {iter_num:5d} | elapsed {elapsed_str:>5} | "
-                f"train {losses['train']:.4f} | val {losses['val']:.4f} | lr {lr:.2e}"
+                f"train {losses['train']:.4f} | val {losses['val']:.4f} | "
+                f"val_bpb {val_bpb_mid:.4f} | lr {lr:.2e}"
             )
             if losses["val"] < best_val_loss:
                 best_val_loss = losses["val"]
@@ -384,11 +389,12 @@ def main():
     # Final evaluation
     losses = estimate_loss(model, train_data, val_data)
     val_loss = losses["val"]
+    val_bpb = val_loss / (avg_bytes_per_token * math.log(2))
     total_time = time.time() - t0
     print(f"\nTraining complete: {iter_num} iters in {total_time:.1f}s")
 
     # This line is read by Claude Code to get the metric
-    print(f"val_loss: {val_loss:.6f}")
+    print(f"val_bpb: {val_bpb:.6f}")
 
 
 if __name__ == "__main__":

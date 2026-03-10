@@ -1,67 +1,85 @@
 """
-prepare.py — READ ONLY. Downloads and tokenizes TinyShakespeare once.
-
-Creates data/input.bin (uint16 token array).
-Run once before training: python prepare.py
+prepare.py — Downloads TinyStories, trains BPE tokenizer (vocab=8192), tokenizes to binary.
+Run once before training. Outputs:
+  data/input.bin      — uint16 tokens (train split)
+  data/val.bin        — uint16 tokens (val split)
+  data/meta.json      — vocab_size, avg_bytes_per_token (needed for val_bpb)
+  data/tokenizer.json — saved BPE tokenizer (for inspection/reuse)
 """
-
-import os
-import struct
-import urllib.request
+import os, json, struct
+from datasets import load_dataset
+from tokenizers import Tokenizer
+from tokenizers.models import BPE
+from tokenizers.trainers import BpeTrainer
+from tokenizers.pre_tokenizers import ByteLevel
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
-INPUT_BIN = os.path.join(DATA_DIR, "input.bin")
-INPUT_TXT = os.path.join(DATA_DIR, "input.txt")
-
-SHAKESPEARE_URL = (
-    "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
-)
+VOCAB_SIZE = 8192
+DATASET_FRACTION = "10%"   # ~200MB text -- enough data, fast download
 
 
-def download():
+def main():
     os.makedirs(DATA_DIR, exist_ok=True)
-    if os.path.exists(INPUT_TXT):
-        print(f"input.txt already exists ({os.path.getsize(INPUT_TXT):,} bytes), skipping download.")
-        return
-    print(f"Downloading TinyShakespeare from {SHAKESPEARE_URL} ...")
-    urllib.request.urlretrieve(SHAKESPEARE_URL, INPUT_TXT)
-    print(f"Downloaded {os.path.getsize(INPUT_TXT):,} bytes → {INPUT_TXT}")
 
+    # 1. Download TinyStories (train + validation splits)
+    print("Downloading TinyStories...")
+    train_ds = load_dataset("roneneldan/TinyStories", split=f"train[:{DATASET_FRACTION}]")
+    val_ds   = load_dataset("roneneldan/TinyStories", split="validation[:5%]")
+    train_texts = train_ds["text"]
+    val_texts   = val_ds["text"]
+    print(f"  Train stories: {len(train_texts):,} | Val stories: {len(val_texts):,}")
 
-def tokenize():
-    if os.path.exists(INPUT_BIN):
-        print(f"input.bin already exists ({os.path.getsize(INPUT_BIN):,} bytes), skipping tokenize.")
-        return
+    # 2. Train BPE tokenizer on train text
+    print(f"Training BPE tokenizer (vocab={VOCAB_SIZE})...")
+    tokenizer = Tokenizer(BPE(unk_token="[UNK]"))
+    tokenizer.pre_tokenizer = ByteLevel()
+    trainer = BpeTrainer(vocab_size=VOCAB_SIZE, special_tokens=["[UNK]"])
+    tokenizer.train_from_iterator(train_texts, trainer=trainer)
+    tokenizer.save(os.path.join(DATA_DIR, "tokenizer.json"))
+    print(f"  Tokenizer trained. Vocab size: {tokenizer.get_vocab_size()}")
 
-    with open(INPUT_TXT, "r", encoding="utf-8") as f:
-        text = f.read()
+    # 3. Tokenize train and compute avg_bytes_per_token
+    print("Tokenizing train split...")
+    all_tokens = []
+    total_bytes = 0
+    for text in train_texts:
+        enc = tokenizer.encode(text)
+        all_tokens.extend(enc.ids)
+        total_bytes += len(text.encode("utf-8"))
+    avg_bytes_per_token = total_bytes / len(all_tokens)
 
-    # Character-level tokenization (same as karpathy/nanoGPT char model)
-    chars = sorted(set(text))
-    vocab_size = len(chars)
-    stoi = {c: i for i, c in enumerate(chars)}
-
-    tokens = [stoi[c] for c in text]
-    n = len(tokens)
-
-    # Write header: [vocab_size (4 bytes), n_tokens (4 bytes)] then uint16 tokens
-    with open(INPUT_BIN, "wb") as f:
-        f.write(struct.pack("<II", vocab_size, n))
-        for t in tokens:
+    # Write train binary: header = (vocab_size, n_tokens) as uint32, then uint16 tokens
+    input_bin = os.path.join(DATA_DIR, "input.bin")
+    with open(input_bin, "wb") as f:
+        f.write(struct.pack("<II", tokenizer.get_vocab_size(), len(all_tokens)))
+        for t in all_tokens:
             f.write(struct.pack("<H", t))
 
-    print(f"Tokenized {n:,} characters → vocab size {vocab_size}")
-    print(f"Wrote {os.path.getsize(INPUT_BIN):,} bytes → {INPUT_BIN}")
+    # 4. Tokenize val split
+    print("Tokenizing val split...")
+    val_tokens = []
+    for text in val_texts:
+        val_tokens.extend(tokenizer.encode(text).ids)
+    val_bin = os.path.join(DATA_DIR, "val.bin")
+    with open(val_bin, "wb") as f:
+        f.write(struct.pack("<II", tokenizer.get_vocab_size(), len(val_tokens)))
+        for t in val_tokens:
+            f.write(struct.pack("<H", t))
 
-    # Save vocab for reference
-    vocab_path = os.path.join(DATA_DIR, "vocab.txt")
-    with open(vocab_path, "w", encoding="utf-8") as f:
-        for i, c in enumerate(chars):
-            f.write(f"{i}\t{repr(c)}\n")
-    print(f"Vocab saved → {vocab_path}")
+    # 5. Write meta.json
+    meta = {
+        "vocab_size": tokenizer.get_vocab_size(),
+        "avg_bytes_per_token": avg_bytes_per_token,
+    }
+    with open(os.path.join(DATA_DIR, "meta.json"), "w") as f:
+        json.dump(meta, f, indent=2)
+
+    print(f"\nDone.")
+    print(f"  Train tokens : {len(all_tokens):,}")
+    print(f"  Val tokens   : {len(val_tokens):,}")
+    print(f"  avg bytes/tok: {avg_bytes_per_token:.3f}")
+    print(f"  Vocab size   : {tokenizer.get_vocab_size()}")
 
 
 if __name__ == "__main__":
-    download()
-    tokenize()
-    print("\nDone. You can now run: python train.py")
+    main()

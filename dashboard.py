@@ -43,21 +43,21 @@ if not all_exps:
 # ── Stats row ──────────────────────────────────────────────────────────────
 total = stats["total"] or 0
 kept = int(stats["kept_count"] or 0)
-best = stats["best_val_loss"]
+best = stats["best_val_bpb"]
 
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Total Experiments", total)
 col2.metric("Improvements (kept)", kept)
-col3.metric("Best Val Loss", f"{best:.6f}" if best is not None else "—")
+col3.metric("Best Val BPB", f"{best:.6f}" if best is not None else "—")
 col4.metric("Improvement Rate", f"{kept/total*100:.0f}%" if total > 0 else "—")
 
 st.divider()
 
 # ── Progress chart ─────────────────────────────────────────────────────────
-st.subheader("Val Loss Progress")
+st.subheader("Val BPB Progress")
 
 ids = [e["id"] for e in all_exps]
-losses = [e["val_loss"] for e in all_exps]
+bpbs = [e["val_bpb"] for e in all_exps]
 names = [e["name"] for e in all_exps]
 kept_flags = [bool(e["kept"]) for e in all_exps]
 notes = [e["notes"] or "" for e in all_exps]
@@ -65,9 +65,9 @@ notes = [e["notes"] or "" for e in all_exps]
 # Running best line
 running_best = []
 current_best = float("inf")
-for loss in losses:
-    if loss is not None and loss < current_best:
-        current_best = loss
+for bpb in bpbs:
+    if bpb is not None and bpb < current_best:
+        current_best = bpb
     running_best.append(current_best if current_best < float("inf") else None)
 
 fig = go.Figure()
@@ -75,24 +75,24 @@ fig = go.Figure()
 # Non-improvements (grey)
 fig.add_trace(go.Scatter(
     x=[ids[i] for i in range(len(ids)) if not kept_flags[i]],
-    y=[losses[i] for i in range(len(losses)) if not kept_flags[i]],
+    y=[bpbs[i] for i in range(len(bpbs)) if not kept_flags[i]],
     mode="markers",
     name="No improvement",
     marker=dict(color="#888888", size=8, symbol="circle"),
     text=[names[i] for i in range(len(names)) if not kept_flags[i]],
-    hovertemplate="<b>%{text}</b><br>Val Loss: %{y:.6f}<br>%{customdata}",
+    hovertemplate="<b>%{text}</b><br>Val BPB: %{y:.6f}<br>%{customdata}",
     customdata=[notes[i] for i in range(len(notes)) if not kept_flags[i]],
 ))
 
 # Improvements (green)
 fig.add_trace(go.Scatter(
     x=[ids[i] for i in range(len(ids)) if kept_flags[i]],
-    y=[losses[i] for i in range(len(losses)) if kept_flags[i]],
+    y=[bpbs[i] for i in range(len(bpbs)) if kept_flags[i]],
     mode="markers",
     name="Improvement",
     marker=dict(color="#00cc44", size=10, symbol="circle"),
     text=[names[i] for i in range(len(names)) if kept_flags[i]],
-    hovertemplate="<b>%{text}</b><br>Val Loss: %{y:.6f}<br>%{customdata}",
+    hovertemplate="<b>%{text}</b><br>Val BPB: %{y:.6f}<br>%{customdata}",
     customdata=[notes[i] for i in range(len(notes)) if kept_flags[i]],
 ))
 
@@ -108,7 +108,7 @@ fig.add_trace(go.Scatter(
 
 fig.update_layout(
     xaxis_title="Experiment #",
-    yaxis_title="Val Loss",
+    yaxis_title="Val BPB",
     legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
     height=400,
     margin=dict(l=40, r=20, t=20, b=40),
@@ -121,13 +121,13 @@ st.divider()
 st.subheader("All Experiments")
 
 df = pd.DataFrame(all_exps)
-df = df.sort_values("val_loss", ascending=True).reset_index(drop=True)
+df = df.sort_values("val_bpb", ascending=True).reset_index(drop=True)
 df["rank"] = df.index + 1
 df["kept"] = df["kept"].apply(lambda x: "✅" if x else "")
-df["val_loss"] = df["val_loss"].apply(lambda x: f"{x:.6f}" if x is not None else "—")
+df["val_bpb"] = df["val_bpb"].apply(lambda x: f"{x:.6f}" if x is not None else "—")
 df["timestamp"] = df["timestamp"].str[:16]
-df = df[["rank", "name", "val_loss", "notes", "timestamp", "kept", "git_hash"]]
-df.columns = ["Rank", "Name", "Val Loss", "Notes", "When", "Kept", "Git"]
+df = df[["rank", "name", "val_bpb", "notes", "timestamp", "kept", "git_hash"]]
+df.columns = ["Rank", "Name", "Val BPB", "Notes", "When", "Kept", "Git"]
 
 st.dataframe(df, width='stretch', hide_index=True)
 

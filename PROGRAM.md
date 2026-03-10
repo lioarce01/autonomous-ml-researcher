@@ -1,32 +1,36 @@
 # PROGRAM.md — Autonomous ML Research Agent
 
-You are an ML research agent running inside Claude Code. Your environment is a directory with a nanoGPT training script and a SQLite-backed experiment database. Your job: minimize `val_loss` on TinyShakespeare through iterated hypothesis-driven experiments.
+You are an ML research agent running inside Claude Code. Your environment is a directory with a nanoGPT training script and a SQLite-backed experiment database. Your job: minimize `val_bpb` on TinyStories through iterated hypothesis-driven experiments.
 
 ---
 
 ## Environment & Key Numbers
 
-**Task**: Character-level language modeling on TinyShakespeare (~1M chars, 65-char vocab).
+**Task**: BPE language modeling on TinyStories (~10% split, ~200MB text, BPE vocab=8192).
 **Budget**: 5 minutes wall-clock per experiment (`BUDGET_SECONDS = 300` in `train.py`).
-**Metric**: `val_loss` (cross-entropy, lower is better). Log to 6 decimal places.
-**Baseline model**: ~22M parameters (N_EMBD=512, N_HEAD=8, N_KV_HEAD=1 (MQA), N_LAYER=8,
+**Metric**: `val_bpb` (bits per byte, lower is better). Log to 6 decimal places.
+  Formula: val_bpb = val_loss_nats / (avg_bytes_per_token * ln(2))
+  val_bpb is vocabulary-size independent and comparable across runs with different tokenizers.
+**Baseline model**: ~12M parameters (N_EMBD=384, N_HEAD=8, N_KV_HEAD=1 (MQA), N_LAYER=8,
 BLOCK_SIZE=256, BATCH_SIZE=128, DROPOUT=0.4, WARMUP_ITERS=200, WEIGHT_DECAY=0.1, LR=1e-3).
 
 **Baseline architecture** (already in train.py — do NOT re-experiment on these):
 - RoPE positional encoding (applied to q, k in attention)
 - Flash Attention via F.scaled_dot_product_attention
-- SwiGLU MLP (gate x up with SiLU, hidden = 2/3 x 4 x n_embd)
+- ReGLU MLP (gate=ReLU², i.e. relu(x)^2 * up; speedrun finding: outperforms SwiGLU)
 - WSD learning rate schedule (warmup-stable-decay)
 - MQA (N_KV_HEAD=1)
 - RMSNorm (replaces LayerNorm in all blocks and final norm)
 - Logit soft-capping: 30.0 * torch.tanh(logits / 30.0)
+- Muon optimizer (matrix params) + AdamW (1D params) — 40% fewer FLOPs than pure AdamW
+- No gradient clipping (speedrun finding: clipping hurts; Muon's orthogonalization handles stability)
 - bfloat16 autocast + TF32 flags
 
-**Val loss scale** (starting from current best of 1.463):
-- Current best: 1.463 (wd_01_l8: N_LAYER=8 + RMSNorm + softcap + WD=0.1 + WARMUP=200)
-- Meaningful improvement: < 1.43
-- Strong result: < 1.30
-- Exceptional: < 1.15
+**Val BPB scale** (fresh DB — first run establishes the new baseline):
+- Baseline: TBD (run baseline first to calibrate)
+- Meaningful improvement: TBD after first run
+- Strong result: TBD after first run
+- Exceptional: TBD after first run
 
 **Device**: GPU. Always train on GPU — `torch.cuda.is_available()` returns `True`. Models up to ~50M params fit within the 5-min budget.
 
@@ -55,14 +59,22 @@ Repeat forever until `.pause` exists:
 2. **Form a hypothesis** — one specific change. Write it out mentally: *"I will change X from A to B because this should reduce val_loss by approximately Y due to Z."*
 3. **Plan the revert** — note the current values you are about to change, so you can restore them exactly if the experiment fails.
 4. **Edit `train.py`** — make exactly one meaningful change.
-5. **Verify the output contract** — confirm `train.py` still contains the line `print(f"val_loss: {val_loss:.6f}")`. Do not remove or alter this line.
-6. **Run training**: `uv run python train.py`
-7. **Handle the result**:
-   - **Success**: output contains `val_loss: X.XXXXXX` → go to step 8.
-   - **Crash / exception**: training did not complete → revert `train.py` to pre-experiment state, log the attempt as a failure (see Error Recovery), go to step 1.
-   - **NaN or loss > 10**: training completed but result is degenerate → treat as crash.
-   - **Early abort** (optional): If at the first eval checkpoint (iter 250) val_loss has not dropped at all from the previous experiment's starting loss, or if loss is rising — abort with Ctrl+C, revert train.py, and log as a crash. Do not waste the remaining 4 minutes on a clearly broken config.
-8. **Log the result**: `uv run python log_result.py --name "NAME" --val_loss X.XXXXXX --notes "NOTES" --hypothesis "HYPOTHESIS"`
+5. **Verify the output contract** — confirm `train.py` still contains the line `print(f"val_bpb: {val_bpb:.6f}")`. Do not remove or alter this line.
+6. **Run training** — redirect all output to file to avoid flooding your context:
+   ```bash
+   uv run python train.py > run.log 2>&1
+   ```
+7. **Read the result**:
+   ```bash
+   grep "val_bpb:" run.log
+   ```
+   - **Non-empty output** → training completed. Extract `val_bpb: X.XXXXXX` → go to step 8.
+   - **Empty output** → training crashed. Run `tail -n 50 run.log` to read the traceback.
+     Attempt a fix if the cause is clear. If not fixable in one edit, revert `train.py`, log as crash (see Error Recovery), go to step 1.
+   - **NaN or bpb > 10** in grep output → degenerate result, treat as crash.
+   - **Early abort** (optional): check `grep "val_bpb" run.log` to see intermediate evals.
+     If val_bpb at iter 250 has not dropped from previous experiment's starting bpb, or is rising — kill the process, revert, log as crash. Do not waste 4 minutes on a broken config.
+8. **Log the result**: `uv run python log_result.py --name "NAME" --val_bpb X.XXXXXX --notes "NOTES" --hypothesis "HYPOTHESIS"`
 8.5. **Write verdict + update NOTES.md**:
    - Was your hypothesis CONFIRMED, FALSIFIED, or INCONCLUSIVE?
    - Estimate HP sensitivity: HIGH (>0.01 delta), MEDIUM (0.005-0.01), LOW (<0.005).
@@ -148,7 +160,7 @@ and produces a misleading result in the DB. When in doubt, search first.
 Change exactly one thing per experiment. This isolates variables so you know what works. Do not combine multiple changes unless CONTEXT.md shows you have already validated each component individually and you are now testing their combination as a deliberate next step.
 
 ### Protect the Output Contract
-`train.py` **must** always end by printing `val_loss: X.XXXXXX`. This is how you read the result. Never remove, rename, or restructure this line.
+`train.py` **must** always end by printing `val_bpb: X.XXXXXX`. This is how you read the result. Never remove, rename, or restructure this line.
 
 ### Unique Experiment Names
 Each experiment name must be unique. If you've already tried `lr_3e4`, name the next attempt `lr_3e4_v2`. Check CONTEXT.md before choosing a name.
@@ -189,9 +201,10 @@ Up to ~50M params is fine on GPU within the 5-min budget. If training hasn't pro
 ## Error Recovery
 
 If `train.py` crashes or produces NaN/degenerate loss:
-1. Revert `train.py` to the last known-good state (the config that produced the current best val_loss in CONTEXT.md).
-2. Log a failure: `uv run python log_result.py --name "NAME_crash" --val_loss 99.0 --notes "Crashed: [brief reason]. Reverted to [last best name]."`
-3. Continue to the next experiment. Do not retry the same crashed config.
+1. Run `tail -n 50 run.log` to read the traceback and identify the cause.
+2. Revert `train.py` to the last known-good state (the config that produced the current best val_bpb in CONTEXT.md).
+3. Log a failure: `uv run python log_result.py --name "NAME_crash" --val_bpb 99.0 --notes "Crashed: [brief reason]. Reverted to [last best name]."`
+4. Continue to the next experiment. Do not retry the same crashed config.
 
 ---
 
@@ -260,25 +273,11 @@ You **may** edit `NOTES.md` freely — it is your persistent research notebook a
 
 Roughly ordered by expected impact on a small character-level model. Work top-to-bottom, skipping anything already tried.
 
-Note: RoPE, Flash Attention, SwiGLU, WSD schedule, MQA, RMSNorm, Logit soft-capping, bfloat16, and TF32 flags are ALL already in train.py baseline. Do NOT experiment on these — they are the starting point.
+Note: RoPE, Flash Attention, ReGLU (ReLU²), WSD schedule, MQA, RMSNorm, Logit soft-capping,
+Muon optimizer, no gradient clipping, bfloat16, and TF32 flags are ALL already in train.py
+baseline. Do NOT experiment on these — they are the starting point.
 
 ### Tier 1 — High Impact
-
-**Activate Muon optimizer** [HIGHEST PRIORITY]
-The Muon class is already implemented in train.py (see `_MuonAdamW`) but the training
-loop uses plain AdamW. To activate it, replace the optimizer setup in `main()`:
-```python
-matrix_params = [p for p in model.parameters() if p.dim() >= 2]
-scalar_params  = [p for p in model.parameters() if p.dim() < 2]
-optimizer = _MuonAdamW(
-    matrix_params, scalar_params,
-    muon_lr=0.02, muon_momentum=0.95,
-    adam_lr=LEARNING_RATE, adam_betas=(0.9, 0.99), adam_wd=WEIGHT_DECAY
-)
-# Update LR in the loop: replace param_group loop with optimizer.set_lr(lr / LEARNING_RATE)
-```
-Expected: same val_loss as AdamW in ~52% of FLOPs -> more iterations in 5 min.
-Source: Liu et al. 2025 arxiv:2502.16982
 
 **QK-Norm**
 Normalize Q and K vectors before the attention dot product. Stabilizes attention entropy,
@@ -302,8 +301,8 @@ Source: Loshchilov et al. 2024 arxiv:2410.01131 (ICLR 2025)
 ### Tier 2 — Medium Impact
 
 **Depth vs Width tradeoff**
-Current: N_LAYER=8, N_EMBD=512. Try deeper: N_LAYER=10 or 12 (more params, check budget).
-Or wider: N_LAYER=6, N_EMBD=640 (more width, fewer layers). Keep total params < 50M.
+Current: N_LAYER=8, N_EMBD=384. Try deeper: N_LAYER=10 or 12 (more params, check budget).
+Or wider: N_LAYER=6, N_EMBD=512 (more width, fewer layers). Keep total params < 50M.
 
 **LR tuning**
 Current: LEARNING_RATE=1e-3. Try 3e-4 (more conservative) or 2e-3 (more aggressive with WSD).
@@ -349,9 +348,6 @@ Used by nanoGPT speedrun. Ablation vs. WSD — one or the other may suit short r
 
 ### Tier 3 — Lower Impact
 
-**ReLU2 activation** (only after Muon validated)
-In the SwiGLU MLP, replace F.silu with squared ReLU: `F.relu(x).pow(2)`.
-
 **Dropout**
 Current: DROPOUT=0.4. Try 0.3 (less regularization) or 0.5 (more).
 
@@ -364,11 +360,10 @@ Current: BLOCK_SIZE=256. Try 512 (more context, fewer iters) or 128 (faster, mor
 **AdamW beta2**
 Current: beta2=0.99. Try 0.95 if training is noisy.
 
-**Gradient clipping**
-Current: GRAD_CLIP=0.5. nanoGPT speedrun finding: aggressive clipping (0.5) measurably
-HURTS training speed. Try: 1.0 (looser), 5.0 (very loose), or remove entirely by setting
-GRAD_CLIP = float('inf') or removing the clip_grad_norm_ call.
-Priority: try removing first, revert if loss diverges.
+**Gradient clipping (add back)**
+Clipping is currently OFF (removed per speedrun finding; Muon orthogonalization handles stability).
+If training diverges on a new config, try adding: `torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)`
+after `loss.backward()`. Remove again once stable.
 
 **Bias terms**
 Current: bias=False throughout. Try adding bias=True to QKV and projection layers.
@@ -377,9 +372,8 @@ Current: bias=False throughout. Try adding bias=True to QKV and projection layer
 
 Attempt only after each component is in the CONTEXT.md leaderboard with kept=YES.
 
-**Bundle A**: Muon + WSD (already have WSD, just activate Muon)
-**Bundle B**: QK-Norm + higher LR (QK-Norm stabilizes attention, enabling the LR push)
-**Bundle C**: All kept individual improvements combined
+**Bundle A**: QK-Norm + higher LR (QK-Norm stabilizes attention, enabling the LR push)
+**Bundle B**: All kept individual improvements combined
 
 ---
 
@@ -437,12 +431,11 @@ Pre-seeded reference list. Key takeaways already extracted — no need to re-fet
 | WSD schedule | Hu et al. 2024 arxiv:2405.18392 | Warmup-Stable-Decay: keep LR constant for ~80% of training, then decay fast; beats cosine |
 | WSD theory | 2026 arxiv:2602.06797 | Theoretical proof that WSD is optimal for LM pretraining; power-decay variant also strong |
 | Muon optimizer | Liu et al. 2025 arxiv:2502.16982 | Orthogonalizes matrix-valued momentum via Newton-Schulz; needs only 52% of AdamW FLOPs to match performance; use AdamW alongside for 1D params (norms, embeddings) |
-| nGPT | Loshchilov et al. 2024 arxiv:2410.01131 | Normalize all vectors (embeddings, weights, hidden states) to unit norm on hypersphere; 4-20x fewer training steps for same accuracy (ICLR 2025) |
+| nGPT | Loshchilov et al. 2024 arxiv:2410.01131 | Normalize all vectors to unit norm on hypersphere; 4-20x fewer training steps; NVIDIA impl available |
 | Peri-LN | 2025 arxiv:2502.02732 | Apply LayerNorm both before AND after each sub-layer (not just pre-norm); adopted by Gemma and OLMo families |
 | ALiBi | Press et al. 2022 arxiv:2108.12409 | Bias-based positional encoding, no learned params, extrapolates to longer sequences |
 | Grokking | Power et al. 2022 arxiv:2201.02177 | Training well past apparent convergence can unlock generalization; don't stop too early |
-| QK-Norm + speedrun techniques | nanoGPT speedrun worklog 2025-2026 | GRAD_CLIP=0.5 hurts; QK-Norm + ReLU^2 + remove clip are speedrun wins |
-| nGPT normalized transformer | Loshchilov et al. 2024 arxiv:2410.01131 | Unit-norm hypersphere representation; 4-20x fewer steps; NVIDIA impl available |
+| QK-Norm + speedrun | nanoGPT speedrun worklog 2025-2026 | ReLU² + remove clip + QK-Norm bundle; all now in baseline except QK-Norm |
 | SWA weight averaging | arXiv:2502.06761 (Feb 2025) | EMA of weights in last 20% of training; free generalization; minimal code |
 
 ---
@@ -450,15 +443,15 @@ Pre-seeded reference list. Key takeaways already extracted — no need to re-fet
 ## Logging Reference
 
 ```bash
-uv run python log_result.py --name "NAME" --val_loss X.XXXXXX \
+uv run python log_result.py --name "NAME" --val_bpb X.XXXXXX \
   --notes "Changed X from A to B. Hypothesis: ..." \
-  --hypothesis "Predicted val_loss < 1.42 because QK-Norm stabilizes attention"
+  --hypothesis "Predicted val_bpb < X.XX because QK-Norm stabilizes attention"
 ```
 
 After running, `log_result.py` will:
 - Insert into SQLite DB (with `kept=1` if new best)
 - Regenerate `CONTEXT.md`
-- Print `kept: YES/NO` and current best val_loss
+- Print `kept: YES/NO` and current best val_bpb
 - Print a suggested `git commit` command — **run it**
 
 ---
@@ -467,7 +460,9 @@ After running, `log_result.py` will:
 
 If `CONTEXT.md` does not exist, this is your first run:
 1. **Check venv**: if `.venv` does not exist, run `uv venv .venv && uv pip install -r requirements.txt` first.
-2. `uv run python train.py` — run the default config (~5 min)
-3. `uv run python log_result.py --name "baseline" --val_loss X.XXXXXX --notes "Baseline: RoPE+Flash+SwiGLU+MQA+WSD+LogitCap+DROPOUT=0.4+BATCH=128+N_LAYER=8, AdamW LR=1e-3."`
+2. **Check data**: if `data/input.bin` does not exist, run `uv run python prepare.py` first (downloads TinyStories, trains BPE tokenizer, writes data/).
+3. `uv run python train.py > run.log 2>&1` — run the default config (~5 min)
+4. `grep "val_bpb:" run.log` — read the result
+5. `uv run python log_result.py --name "baseline" --val_bpb X.XXXXXX --notes "Baseline: RoPE+Flash+ReGLU+MQA+WSD+LogitCap+RMSNorm+Muon+NoClip, N_EMBD=384 N_LAYER=8 DROPOUT=0.4 WD=0.1 LR=1e-3. TinyStories BPE vocab=8192."`
 4. Run the suggested git commit.
 5. Begin the research loop from step 1.

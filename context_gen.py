@@ -32,7 +32,6 @@ _TECHNIQUES = [
     ("Gradient clipping",     3, ["grad_clip", "clip_", "no_clip", "clip_off", "clip_none", "clip_1", "clip_5"]),
     ("Post-norm",             3, ["post_norm", "postnorm"]),
     # Tier 4 — literature / ambitious
-    ("Muon optimizer",        4, ["muon"]),
     ("Peri-LN",               4, ["peri", "peri_ln"]),
 ]
 
@@ -64,7 +63,7 @@ def generate():
 
     total = stats["total"] or 0
     kept_count = int(stats["kept_count"] or 0)
-    best_val_loss = stats["best_val_loss"]
+    best_val_bpb = stats["best_val_bpb"]
     pct = f"{kept_count/total*100:.0f}%" if total > 0 else "N/A"
 
     # Current best
@@ -73,7 +72,7 @@ def generate():
         streak_str = f"  |  Failure streak: {streak}" if streak > 0 else ""
         best_section = (
             f"**Experiment**: `{best['name']}` | "
-            f"**Val Loss**: `{best['val_loss']:.6f}` | "
+            f"**Val BPB**: `{best['val_bpb']:.6f}` | "
             f"**Notes**: {best['notes'] or '-'}"
             f"{streak_str}"
         )
@@ -82,11 +81,11 @@ def generate():
 
     # Leaderboard table
     if top:
-        header = "| Rank | Name | Val Loss | Notes | When |\n|---|---|---|---|---|\n"
+        header = "| Rank | Name | Val BPB | Notes | When |\n|---|---|---|---|---|\n"
         rows = ""
         for i, exp in enumerate(top, 1):
             rows += (
-                f"| {i} | `{exp['name']}` | `{exp['val_loss']:.6f}` "
+                f"| {i} | `{exp['name']}` | `{exp['val_bpb']:.6f}` "
                 f"| {exp['notes'] or '-'} | {exp['timestamp'][:16]} |\n"
             )
         leaderboard = header + rows
@@ -95,11 +94,11 @@ def generate():
 
     # Recent non-improvements
     if failures:
-        f_header = "| Name | Val Loss | Notes |\n|---|---|---|\n"
+        f_header = "| Name | Val BPB | Notes |\n|---|---|---|\n"
         f_rows = ""
         for exp in failures:
             f_rows += (
-                f"| `{exp['name']}` | `{exp['val_loss']:.6f}` "
+                f"| `{exp['name']}` | `{exp['val_bpb']:.6f}` "
                 f"| {exp['notes'] or '-'} |\n"
             )
         failures_section = f_header + f_rows
@@ -107,15 +106,15 @@ def generate():
         failures_section = "_None yet._"
 
     # Improvement stats
-    if baseline and best_val_loss is not None and baseline["val_loss"] is not None:
-        improvement = (baseline["val_loss"] - best_val_loss) / baseline["val_loss"] * 100
+    if baseline and best_val_bpb is not None and baseline["val_bpb"] is not None:
+        improvement = (baseline["val_bpb"] - best_val_bpb) / baseline["val_bpb"] * 100
         improvement_str = f"-{improvement:.1f}%"
-        baseline_str = f"{baseline['val_loss']:.6f}"
+        baseline_str = f"{baseline['val_bpb']:.6f}"
     else:
         improvement_str = "N/A"
         baseline_str = "N/A"
 
-    best_str = f"{best_val_loss:.6f}" if best_val_loss is not None else "N/A"
+    best_str = f"{best_val_bpb:.6f}" if best_val_bpb is not None else "N/A"
 
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -133,7 +132,7 @@ def generate():
 {unexplored}
 ## Progress
 - Total experiments: {total}  |  Kept (improvements): {kept_count} ({pct})
-- Initial baseline loss: {baseline_str}  |  Best so far: {best_str}  |  Improvement: {improvement_str}
+- Initial baseline bpb: {baseline_str}  |  Best so far: {best_str}  |  Improvement: {improvement_str}
 """
 
     # Append agent-written notes if they exist (survives regeneration)

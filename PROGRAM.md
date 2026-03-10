@@ -10,7 +10,7 @@ You are an ML research agent running inside Claude Code. Your environment is a d
 **Budget**: 5 minutes wall-clock per experiment (`BUDGET_SECONDS = 300` in `train.py`).
 **Metric**: `val_loss` (cross-entropy, lower is better). Log to 6 decimal places.
 **Baseline model**: ~22M parameters (N_EMBD=512, N_HEAD=8, N_KV_HEAD=1 (MQA), N_LAYER=8,
-BLOCK_SIZE=256, BATCH_SIZE=128, DROPOUT=0.5, WARMUP_ITERS=200).
+BLOCK_SIZE=256, BATCH_SIZE=128, DROPOUT=0.4, WARMUP_ITERS=200, WEIGHT_DECAY=0.1, LR=1e-3).
 
 **Baseline architecture** (already in train.py — do NOT re-experiment on these):
 - RoPE positional encoding (applied to q, k in attention)
@@ -18,11 +18,12 @@ BLOCK_SIZE=256, BATCH_SIZE=128, DROPOUT=0.5, WARMUP_ITERS=200).
 - SwiGLU MLP (gate x up with SiLU, hidden = 2/3 x 4 x n_embd)
 - WSD learning rate schedule (warmup-stable-decay)
 - MQA (N_KV_HEAD=1)
+- RMSNorm (replaces LayerNorm in all blocks and final norm)
 - Logit soft-capping: 30.0 * torch.tanh(logits / 30.0)
 - bfloat16 autocast + TF32 flags
 
-**Val loss scale** (starting from current best of 1.462):
-- Current best: 1.462 (batch128 + dropout_04 validated)
+**Val loss scale** (starting from current best of 1.463):
+- Current best: 1.463 (wd_01_l8: N_LAYER=8 + RMSNorm + softcap + WD=0.1 + WARMUP=200)
 - Meaningful improvement: < 1.43
 - Strong result: < 1.30
 - Exceptional: < 1.15
@@ -473,6 +474,6 @@ After running, `log_result.py` will:
 If `CONTEXT.md` does not exist, this is your first run:
 1. **Check venv**: if `.venv` does not exist, run `uv venv .venv && uv pip install -r requirements.txt` first.
 2. `uv run python train.py` — run the default config (~5 min)
-3. `uv run python log_result.py --name "baseline" --val_loss X.XXXXXX --notes "Baseline: RoPE+Flash+SwiGLU+MQA+WSD+LogitCap+DROPOUT=0.5+BATCH=128+N_LAYER=8, AdamW LR=1e-3."`
+3. `uv run python log_result.py --name "baseline" --val_loss X.XXXXXX --notes "Baseline: RoPE+Flash+SwiGLU+MQA+WSD+LogitCap+DROPOUT=0.4+BATCH=128+N_LAYER=8, AdamW LR=1e-3."`
 4. Run the suggested git commit.
 5. Begin the research loop from step 1.

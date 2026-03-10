@@ -92,6 +92,15 @@ def _apply_rope(x, cos, sin):
     return x * cos.unsqueeze(0).unsqueeze(0) + _rotate_half(x) * sin.unsqueeze(0).unsqueeze(0)
 
 
+class RMSNorm(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.g = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        return x / x.norm(2, dim=-1, keepdim=True) * (x.shape[-1] ** 0.5) * self.g
+
+
 class CausalSelfAttention(nn.Module):
     def __init__(self, n_embd, n_head, n_kv_head, block_size, dropout):
         super().__init__()
@@ -143,9 +152,9 @@ class MLP(nn.Module):
 class Block(nn.Module):
     def __init__(self, n_embd, n_head, n_kv_head, block_size, dropout):
         super().__init__()
-        self.ln1 = nn.LayerNorm(n_embd)
+        self.ln1 = RMSNorm(n_embd)
         self.attn = CausalSelfAttention(n_embd, n_head, n_kv_head, block_size, dropout)
-        self.ln2 = nn.LayerNorm(n_embd)
+        self.ln2 = RMSNorm(n_embd)
         self.mlp = MLP(n_embd, dropout)
 
     def forward(self, x):
@@ -162,7 +171,7 @@ class GPT(nn.Module):
             wte=nn.Embedding(vocab_size, n_embd),
             drop=nn.Dropout(dropout),
             h=nn.ModuleList([Block(n_embd, n_head, n_kv_head, block_size, dropout) for _ in range(n_layer)]),
-            ln_f=nn.LayerNorm(n_embd),
+            ln_f=RMSNorm(n_embd),
         ))
         self.lm_head = nn.Linear(n_embd, vocab_size, bias=False)
         # Weight tying

@@ -20,7 +20,7 @@ from torch.nn import functional as F
 # Hyperparameters — Claude Code edits these (and anything else)
 # ---------------------------------------------------------------------------
 BUDGET_SECONDS = 300        # wall-clock training budget
-BATCH_SIZE     = 64         # micro-batch size
+BATCH_SIZE     = 128        # micro-batch size
 BLOCK_SIZE     = 256        # context length (tokens)
 N_EMBD         = 512        # embedding dimension
 N_HEAD         = 8          # number of attention heads
@@ -227,6 +227,72 @@ def estimate_loss(model, train_data, val_data):
         losses[split] = sum(split_losses) / len(split_losses)
     model.train()
     return losses
+
+
+# ---------------------------------------------------------------------------
+# Muon + AdamW combined optimizer (arxiv:2502.16982)
+# ---------------------------------------------------------------------------
+
+class _MuonAdamW:
+    """Muon for 2D matrix params, AdamW for 1D (norms, embeddings, biases)."""
+
+    def __init__(self, matrix_params, scalar_params,
+                 muon_lr, muon_momentum,
+                 adam_lr, adam_betas, adam_wd, ns_steps=5):
+        self.muon_lr_base = muon_lr
+        self.adam_lr_base = adam_lr
+        self.ns_steps = ns_steps
+        self.muon_state = {}
+        self.muon_params = list(matrix_params)
+        for p in self.muon_params:
+            self.muon_state[p] = {"buf": torch.zeros_like(p, dtype=torch.float32)}
+        self.muon_momentum = muon_momentum
+        self.adam = torch.optim.AdamW(scalar_params, lr=adam_lr,
+                                      betas=adam_betas, weight_decay=adam_wd)
+        self._lr_ratio = 1.0
+
+    def set_lr(self, ratio):
+        self._lr_ratio = ratio
+        for pg in self.adam.param_groups:
+            pg["lr"] = self.adam_lr_base * ratio
+
+    def zero_grad(self, set_to_none=True):
+        for p in self.muon_params:
+            if set_to_none:
+                p.grad = None
+            elif p.grad is not None:
+                p.grad.zero_()
+        self.adam.zero_grad(set_to_none=set_to_none)
+
+    @torch.no_grad()
+    def step(self):
+        lr = self.muon_lr_base * self._lr_ratio
+        m = self.muon_momentum
+        ns = self.ns_steps
+        a, b, c = 3.4445, -4.7750, 2.0315
+        for p in self.muon_params:
+            if p.grad is None:
+                continue
+            g = p.grad.float()
+            # Newton-Schulz orthogonalization
+            gv = g.view(g.shape[0], -1)
+            norm = gv.norm() + 1e-7
+            X = gv / norm
+            if X.shape[0] > X.shape[1]:
+                X = X.T
+            for _ in range(ns):
+                A = X @ X.T
+                X = a * X + (b * A + c * A @ A) @ X
+            if gv.shape[0] > gv.shape[1]:
+                X = X.T
+            g_orth = (X * norm).view(g.shape)
+            # SGD momentum
+            state = self.muon_state[p]
+            buf = state["buf"]
+            buf.mul_(m).add_(g_orth)
+            update = g_orth + m * buf  # nesterov
+            p.add_(update.to(p.dtype), alpha=-lr)
+        self.adam.step()
 
 
 # ---------------------------------------------------------------------------

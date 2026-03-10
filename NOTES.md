@@ -9,14 +9,14 @@ Update it after literature searches, every 5 experiments, and whenever a meaning
 
 **Update this section every time a new val_bpb record is set (kept: YES).**
 
-- **Experiment**: `baseline` | **Val BPB**: TBD (first run pending)
+- **Experiment**: `baseline_ext` | **Val BPB**: 0.845044
 - N_EMBD=384, N_HEAD=8, N_KV_HEAD=1, N_LAYER=8
 - BLOCK_SIZE=256, BATCH_SIZE=128, DROPOUT=0.4, WEIGHT_DECAY=0.1
 - LEARNING_RATE=1e-3, MIN_LR=1e-4, WARMUP_ITERS=200, no grad clipping
 - Optimizer: Muon (matrix) + AdamW (1D), muon_lr=0.02, muon_momentum=0.95
 - MLP: ReGLU (ReLU^2)
 - Dataset: TinyStories 10%, BPE vocab=8192
-- ~12M params
+- ~12M params, 1387 iters/10min (680 iters/5min)
 
 ---
 

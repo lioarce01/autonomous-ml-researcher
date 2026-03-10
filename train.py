@@ -137,6 +137,9 @@ class CausalSelfAttention(nn.Module):
         k, v = kv.split(self.n_kv_head * head_dim, dim=2)
         k = k.view(B, T, self.n_kv_head, head_dim).transpose(1, 2)
         v = v.view(B, T, self.n_kv_head, head_dim).transpose(1, 2)
+        # QK-Norm: normalize before RoPE to stabilize attention entropy
+        q = q / (q.norm(dim=-1, keepdim=True) + 1e-6)
+        k = k / (k.norm(dim=-1, keepdim=True) + 1e-6)
         cos, sin = _build_rope(T, head_dim, x.device)
         q = _apply_rope(q, cos, sin)
         k = _apply_rope(k, cos, sin)

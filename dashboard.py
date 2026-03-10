@@ -7,6 +7,7 @@ Run in a separate terminal:
 
 import time
 import os
+import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 
@@ -112,14 +113,12 @@ fig.update_layout(
     height=400,
     margin=dict(l=40, r=20, t=20, b=40),
 )
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, width='stretch')
 
 st.divider()
 
 # ── Leaderboard table ──────────────────────────────────────────────────────
 st.subheader("All Experiments")
-
-import pandas as pd
 
 df = pd.DataFrame(all_exps)
 df = df.sort_values("val_loss", ascending=True).reset_index(drop=True)
@@ -130,7 +129,7 @@ df["timestamp"] = df["timestamp"].str[:16]
 df = df[["rank", "name", "val_loss", "notes", "timestamp", "kept", "git_hash"]]
 df.columns = ["Rank", "Name", "Val Loss", "Notes", "When", "Kept", "Git"]
 
-st.dataframe(df, use_container_width=True, hide_index=True)
+st.dataframe(df, width='stretch', hide_index=True)
 
 # ── Auto-refresh ───────────────────────────────────────────────────────────
 st.caption(f"Auto-refreshes every 30s. Last updated: {time.strftime('%H:%M:%S')}")

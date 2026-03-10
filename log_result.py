@@ -30,9 +30,11 @@ def main():
     parser.add_argument("--name", required=True, help="Experiment name (short, descriptive)")
     parser.add_argument("--val_loss", required=True, type=float, help="Validation loss")
     parser.add_argument("--notes", default="", help="Short description of what changed")
+    parser.add_argument("--hypothesis", default=None,
+        help="What you predicted would happen and why (optional)")
     args = parser.parse_args()
 
-    row = db.log(args.name, args.val_loss, args.notes)
+    row = db.log(args.name, args.val_loss, args.notes, hypothesis=args.hypothesis)
 
     git_hash = get_git_hash()
     if git_hash:

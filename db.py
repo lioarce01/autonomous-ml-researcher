@@ -27,10 +27,16 @@ def _connect():
     conn.row_factory = sqlite3.Row
     conn.execute(DDL)
     conn.commit()
+    # Safe migration: add hypothesis column if it doesn't exist
+    try:
+        conn.execute("ALTER TABLE experiments ADD COLUMN hypothesis TEXT")
+        conn.commit()
+    except Exception:
+        pass  # column already exists
     return conn
 
 
-def log(name: str, val_loss: float, notes: str = "") -> dict:
+def log(name: str, val_loss: float, notes: str = "", hypothesis: str = None) -> dict:
     """Insert experiment. Sets kept=1 if this is a new best val_loss."""
     conn = _connect()
     current_best = conn.execute(
@@ -40,8 +46,8 @@ def log(name: str, val_loss: float, notes: str = "") -> dict:
     kept = 1 if (current_best is None or val_loss < current_best) else 0
 
     cursor = conn.execute(
-        "INSERT INTO experiments (name, val_loss, notes, kept) VALUES (?, ?, ?, ?)",
-        (name, val_loss, notes, kept),
+        "INSERT INTO experiments (name, val_loss, notes, kept, hypothesis) VALUES (?, ?, ?, ?, ?)",
+        (name, val_loss, notes, kept, hypothesis),
     )
     conn.commit()
     row_id = cursor.lastrowid

@@ -9,8 +9,8 @@ You are an ML research agent running inside Claude Code. Your environment is a d
 **Task**: Character-level language modeling on TinyShakespeare (~1M chars, 65-char vocab).
 **Budget**: 5 minutes wall-clock per experiment (`BUDGET_SECONDS = 300` in `train.py`).
 **Metric**: `val_loss` (cross-entropy, lower is better). Log to 6 decimal places.
-**Baseline model**: ~16M parameters (N_EMBD=512, N_HEAD=8, N_KV_HEAD=1 (MQA), N_LAYER=6,
-BLOCK_SIZE=256, BATCH_SIZE=128, DROPOUT=0.4).
+**Baseline model**: ~22M parameters (N_EMBD=512, N_HEAD=8, N_KV_HEAD=1 (MQA), N_LAYER=8,
+BLOCK_SIZE=256, BATCH_SIZE=128, DROPOUT=0.5, WARMUP_ITERS=200).
 
 **Baseline architecture** (already in train.py — do NOT re-experiment on these):
 - RoPE positional encoding (applied to q, k in attention)
@@ -18,6 +18,7 @@ BLOCK_SIZE=256, BATCH_SIZE=128, DROPOUT=0.4).
 - SwiGLU MLP (gate x up with SiLU, hidden = 2/3 x 4 x n_embd)
 - WSD learning rate schedule (warmup-stable-decay)
 - MQA (N_KV_HEAD=1)
+- Logit soft-capping: 30.0 * torch.tanh(logits / 30.0)
 - bfloat16 autocast + TF32 flags
 
 **Val loss scale** (starting from current best of 1.462):
@@ -60,7 +61,13 @@ Repeat forever until `.pause` exists:
    - **Crash / exception**: training did not complete → revert `train.py` to pre-experiment state, log the attempt as a failure (see Error Recovery), go to step 1.
    - **NaN or loss > 10**: training completed but result is degenerate → treat as crash.
    - **Early abort** (optional): If at the first eval checkpoint (iter 250) val_loss has not dropped at all from the previous experiment's starting loss, or if loss is rising — abort with Ctrl+C, revert train.py, and log as a crash. Do not waste the remaining 4 minutes on a clearly broken config.
-8. **Log the result**: `uv run python log_result.py --name "NAME" --val_loss X.XXXXXX --notes "NOTES"`
+8. **Log the result**: `uv run python log_result.py --name "NAME" --val_loss X.XXXXXX --notes "NOTES" --hypothesis "HYPOTHESIS"`
+8.5. **Write verdict**: Before moving to the next experiment, explicitly state:
+   - Was your hypothesis CONFIRMED (improvement as predicted), FALSIFIED (worse or no change), or INCONCLUSIVE (crash/NaN)?
+   - Estimate HP sensitivity: HIGH (>0.01 val_loss delta), MEDIUM (0.005-0.01), LOW (<0.005).
+   - If FALSIFIED: note WHY — was the hypothesis wrong, or was implementation buggy?
+   Include this as a one-line note to yourself before step 1 of the next iteration.
+   This builds your mental model of what levers are effective.
 9. **Commit**: run the exact `git commit` command printed by `log_result.py`.
 10. **State management**:
     - If `kept: YES` — this is your new base config. Keep `train.py` as-is for the next experiment.
@@ -156,6 +163,14 @@ Example: `"Changed LEARNING_RATE from 1e-3 to 3e-4. Hypothesis: lower LR reduces
 
 ### Combination Readiness
 Before attempting a Tier 4 combination experiment, verify that **each** component appears in CONTEXT.md leaderboard with `kept: YES`. If a component was never kept, it has not been validated — test it individually first.
+
+### Hyperparameter Sensitivity Map
+After every 5 experiments, mentally update your sensitivity model:
+- Which HPs have shown HIGH sensitivity (>0.01 val_loss delta when changed)?
+- Which are LOW sensitivity (<0.005 delta)?
+- Prioritize high-sensitivity dimensions for future experiments.
+- Stop experimenting on a dimension once you've run 3 trials with no improvement.
+Example mental model: "LR=HIGH, DROPOUT=MEDIUM, BLOCK_SIZE=LOW, N_LAYER=HIGH"
 
 ### Simplicity Criterion
 Given equal val_loss, prefer the simpler config: fewer parameters, less code, less memory. A 5M model at val_loss=1.30 beats a 15M model at val_loss=1.30.
@@ -271,12 +286,24 @@ class RMSNorm(nn.Module):
 ```
 Replace all `nn.LayerNorm(n_embd)` calls with `RMSNorm(n_embd)`.
 
-**Logit Soft-Capping**
-In `GPT.forward()`, before computing loss:
+**QK-Norm**
+Normalize Q and K vectors before the attention dot product. Stabilizes attention entropy,
+prevents attention collapse at higher LRs, enables pushing LR 1.5-2x higher.
+In CausalSelfAttention.forward(), after computing q and k but before applying RoPE:
 ```python
-logits = 30.0 * torch.tanh(logits / 30.0)
+q = q / (q.norm(dim=-1, keepdim=True) + 1e-6)
+k = k / (k.norm(dim=-1, keepdim=True) + 1e-6)
 ```
-Prevents attention entropy collapse; allows higher LR. Adopted by Gemma 2. Try cap 30 or 50.
+Used in the nanoGPT speedrun record. Pair with a higher LR experiment after validating.
+Source: nanoGPT speedrun worklog (2025-2026)
+
+**nGPT — Normalized Transformer** [AMBITIOUS — HIGH UPSIDE]
+All embeddings, MLP weights, attention matrices, and hidden states normalized to unit norm
+on a hypersphere. Claims 4-20x faster convergence in training steps vs. standard GPT.
+At 5-min budget, 4x convergence speedup = same result as 20-min standard run.
+NVIDIA official implementation: https://github.com/NVIDIA/ngpt
+WebSearch "nGPT normalized transformer pytorch" before implementing — non-trivial rewrite.
+Source: Loshchilov et al. 2024 arxiv:2410.01131 (ICLR 2025)
 
 ### Tier 2 — Medium Impact
 
@@ -289,11 +316,42 @@ Current: LEARNING_RATE=1e-3. Try 3e-4 (more conservative) or 2e-3 (more aggressi
 WSD schedule tolerates higher peak LR than cosine — explore the upper end.
 
 **Warmup tuning**
-Current: WARMUP_ITERS=100. Try 200 or 50. Affects how quickly LR reaches peak.
+Current: WARMUP_ITERS=200. Try 100 or 400. Affects how quickly LR reaches peak.
 
-**Logit Soft-Capping + higher LR** (after soft-capping validated)
-Once capping is validated, try pushing LEARNING_RATE to 2e-3 or 3e-3. Capping prevents
-the instability that normally limits LR.
+**Higher LR (leveraging existing soft-capping)**
+Soft-capping (already in baseline) prevents attention entropy collapse and allows higher LR.
+Current LEARNING_RATE=1e-3. Try 2e-3 or 3e-3 — capping should prevent instability.
+Run this before LR tuning experiments to find the true upper bound.
+
+**Stochastic Weight Averaging (SWA)**
+In the last 20% of training, maintain a running EMA of model weights. Evaluate the
+averaged checkpoint instead of the final one for val_loss. ~5 lines of code:
+```python
+# Add after optimizer step in the last 20% of training:
+if it > int(max_iters * 0.80):
+    if swa_model is None:
+        import copy; swa_model = copy.deepcopy(model); swa_count = 1
+    else:
+        for p_swa, p in zip(swa_model.parameters(), model.parameters()):
+            p_swa.data.mul_(swa_count / (swa_count + 1)).add_(p.data / (swa_count + 1))
+        swa_count += 1
+# At end of training, evaluate swa_model instead of model
+```
+Free generalization improvement. Source: arXiv:2502.06761
+
+**Trapezoidal LR schedule**
+Alternative to WSD: warmup -> hold -> linear decay (simpler, no cosine in decay phase).
+```python
+def get_lr(it, max_iters):
+    decay_start = int(max_iters * 0.85)
+    if it < WARMUP_ITERS:
+        return LEARNING_RATE * it / WARMUP_ITERS
+    if it < decay_start:
+        return LEARNING_RATE
+    ratio = (it - decay_start) / (max_iters - decay_start)
+    return LEARNING_RATE * (1 - ratio) + MIN_LR * ratio
+```
+Used by nanoGPT speedrun. Ablation vs. WSD — one or the other may suit short runs better.
 
 ### Tier 3 — Lower Impact
 
@@ -313,7 +371,10 @@ Current: BLOCK_SIZE=256. Try 512 (more context, fewer iters) or 128 (faster, mor
 Current: beta2=0.99. Try 0.95 if training is noisy.
 
 **Gradient clipping**
-Current: GRAD_CLIP=0.5. Try 1.0 (looser) or 0.25 (tighter).
+Current: GRAD_CLIP=0.5. nanoGPT speedrun finding: aggressive clipping (0.5) measurably
+HURTS training speed. Try: 1.0 (looser), 5.0 (very loose), or remove entirely by setting
+GRAD_CLIP = float('inf') or removing the clip_grad_norm_ call.
+Priority: try removing first, revert if loss diverges.
 
 **Bias terms**
 Current: bias=False throughout. Try adding bias=True to QKV and projection layers.
@@ -385,13 +446,18 @@ Pre-seeded reference list. Key takeaways already extracted — no need to re-fet
 | Peri-LN | 2025 arxiv:2502.02732 | Apply LayerNorm both before AND after each sub-layer (not just pre-norm); adopted by Gemma and OLMo families |
 | ALiBi | Press et al. 2022 arxiv:2108.12409 | Bias-based positional encoding, no learned params, extrapolates to longer sequences |
 | Grokking | Power et al. 2022 arxiv:2201.02177 | Training well past apparent convergence can unlock generalization; don't stop too early |
+| QK-Norm + speedrun techniques | nanoGPT speedrun worklog 2025-2026 | GRAD_CLIP=0.5 hurts; QK-Norm + ReLU^2 + remove clip are speedrun wins |
+| nGPT normalized transformer | Loshchilov et al. 2024 arxiv:2410.01131 | Unit-norm hypersphere representation; 4-20x fewer steps; NVIDIA impl available |
+| SWA weight averaging | arXiv:2502.06761 (Feb 2025) | EMA of weights in last 20% of training; free generalization; minimal code |
 
 ---
 
 ## Logging Reference
 
 ```bash
-uv run python log_result.py --name "NAME" --val_loss X.XXXXXX --notes "Changed X from A to B. Hypothesis: ..."
+uv run python log_result.py --name "NAME" --val_loss X.XXXXXX \
+  --notes "Changed X from A to B. Hypothesis: ..." \
+  --hypothesis "Predicted val_loss < 1.42 because QK-Norm stabilizes attention"
 ```
 
 After running, `log_result.py` will:
@@ -407,6 +473,6 @@ After running, `log_result.py` will:
 If `CONTEXT.md` does not exist, this is your first run:
 1. **Check venv**: if `.venv` does not exist, run `uv venv .venv && uv pip install -r requirements.txt` first.
 2. `uv run python train.py` — run the default config (~5 min)
-3. `uv run python log_result.py --name "baseline" --val_loss X.XXXXXX --notes "Baseline: RoPE+Flash+SwiGLU+MQA+WSD+DROPOUT=0.4+BATCH=128, AdamW LR=1e-3."`
+3. `uv run python log_result.py --name "baseline" --val_loss X.XXXXXX --notes "Baseline: RoPE+Flash+SwiGLU+MQA+WSD+LogitCap+DROPOUT=0.5+BATCH=128+N_LAYER=8, AdamW LR=1e-3."`
 4. Run the suggested git commit.
 5. Begin the research loop from step 1.

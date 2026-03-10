@@ -20,7 +20,7 @@ from torch.nn import functional as F
 # Hyperparameters — Claude Code edits these (and anything else)
 # ---------------------------------------------------------------------------
 BUDGET_SECONDS = 300        # wall-clock training budget
-BATCH_SIZE     = 32         # micro-batch size
+BATCH_SIZE     = 16         # micro-batch size
 BLOCK_SIZE     = 128        # context length (tokens)
 N_EMBD         = 192        # embedding dimension
 N_HEAD         = 6          # number of attention heads

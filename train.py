@@ -24,7 +24,7 @@ BATCH_SIZE     = 16         # micro-batch size
 BLOCK_SIZE     = 128        # context length (tokens)
 N_EMBD         = 192        # embedding dimension
 N_HEAD         = 6          # number of attention heads
-N_KV_HEAD      = 2          # number of KV heads for GQA (must divide N_HEAD)
+N_KV_HEAD      = 1          # number of KV heads for GQA (must divide N_HEAD)
 N_LAYER        = 6          # number of transformer blocks
 DROPOUT        = 0.0        # dropout (0.0 = off; good for small data)
 LEARNING_RATE  = 1e-3       # peak learning rate

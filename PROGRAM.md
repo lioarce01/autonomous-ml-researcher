@@ -64,10 +64,36 @@ Repeat forever until `.pause` exists:
 9. **Commit**: run the exact `git commit` command printed by `log_result.py`.
 10. **State management**:
     - If `kept: YES` — this is your new base config. Keep `train.py` as-is for the next experiment.
+      Then check for **Adaptive Budget Extension** (see rule below).
     - If `kept: NO` — revert `train.py` to the last kept (best) config before starting the next experiment.
 11. **Pause check**: `uv run python -c "import os; print('PAUSED' if os.path.exists('.pause') else 'CONTINUE')"`
     - If `PAUSED` — stop. The human will resume you.
     - If `CONTINUE` — go to step 1.
+
+---
+
+## Adaptive Budget Extension
+
+After a `kept: YES` result, check whether the model was still converging at the end of training.
+Look at the printed eval lines: find the last two val_loss values before the final eval.
+
+**Extend if**: val_loss improved by > 0.005 per 100 iters during the last 20% of training.
+
+How to calculate: take the second-to-last eval val and the final val_loss, divide the drop by
+the iter gap, scale to per-100-iter rate. Example: iter 750 val=1.493, final (iter 822) val=1.465
+→ drop=0.028 over 72 iters → 0.039 per 100 iters → EXTEND (> 0.005 threshold).
+
+**Extension procedure**:
+1. Set `BUDGET_SECONDS = 600` in `train.py`.
+2. Run training: `uv run python train.py`
+3. Log as `[original_name]_ext` with the same notes plus "Extended to 600s — loss still converging."
+4. Restore `BUDGET_SECONDS = 300` in `train.py` after logging.
+5. If `_ext` is kept → it becomes the new base. If not → the original kept result stays as base.
+
+**Rules**:
+- Only extend once per config. If the `_ext` run still shows plateau, accept and move on.
+- Never extend a config that was NOT kept.
+- Never extend if the last 20% shows < 0.005/100 iter improvement (plateau — more time won't help).
 
 ---
 

@@ -1,20 +1,10 @@
-# Architecture — Autonomous ML Trainer
+# Architecture — Autonomous ML Researcher
 
 ## Concept
 
-**Claude Code CLI is the research agent.** The project provides the *environment* the agent operates within: structured memory, auto-generated context, SQLite tracking, and a live web dashboard.
+**Claude Code/Codex CLI is the research agent.** The project provides the *environment* the agent operates within: structured memory, auto-generated context, SQLite tracking, and a live web dashboard.
 
 This is a genuine enhancement over [karpathy/autoresearch](https://github.com/karpathy/nanoGPT) without overengineering:
-
-| Aspect | karpathy/autoresearch | This project |
-|---|---|---|
-| Agent | Claude/Codex via API | Claude Code CLI (same model, better tool use) |
-| Memory | `results.tsv` (no cross-session memory) | SQLite DB + auto-generated `CONTEXT.md` |
-| Context | None | `CONTEXT.md` injected each iteration |
-| UI | None | Streamlit dashboard with Plotly chart |
-| Human control | Kill process | Touch `.pause` file |
-| Training budget | Fixed wall-clock | Fixed wall-clock (300s) |
-| Editing surface | Agent edits `train.py` | Agent edits `train.py` |
 
 ---
 
@@ -22,11 +12,11 @@ This is a genuine enhancement over [karpathy/autoresearch](https://github.com/ka
 
 ```
 autonomous-ml-trainer/
-├── PROGRAM.md          ← Claude Code's system prompt (instructions for the agent)
+├── PROGRAM.md          ← Agent's system prompt (instructions for the agent)
 ├── CONTEXT.md          ← Auto-generated each run; agent reads this for memory
-├── train.py            ← Editable by Claude Code. nanoGPT on TinyShakespeare.
+├── train.py            ← Editable by Agent. nanoGPT on TinyShakespeare.
 ├── prepare.py          ← READ ONLY. Downloads + tokenizes dataset once.
-├── log_result.py       ← Claude Code calls this after each run to save to DB
+├── log_result.py       ← Agent calls this after each run to save to DB
 ├── context_gen.py      ← Called by log_result.py; reads DB → writes CONTEXT.md
 ├── db.py               ← sqlite3 stdlib wrapper, no ORM
 ├── dashboard.py        ← Streamlit live dashboard
@@ -38,15 +28,15 @@ autonomous-ml-trainer/
     └── input.txt       ← Raw TinyShakespeare text
 ```
 
-**6 Python files + 2 Markdown files. No LangGraph, no ChromaDB, no MLflow, no Lightning.**
-Dependencies: stdlib + torch + streamlit + plotly + pandas.
+**Dependencies: stdlib + torch + streamlit + plotly + pandas.**
+
 
 ---
 
 ## Agent Loop
 
 ```
-[Claude Code reads PROGRAM.md on startup]
+[Agent reads PROGRAM.md on startup]
     ↓
 Loop forever:
     1. Read CONTEXT.md          → what's been tried, what's working
@@ -83,14 +73,14 @@ CREATE TABLE experiments (
 ```
 train.py
   └─ prints "val_loss: X.XXXXXX"
-       ↓ Claude Code reads this
+       ↓ Agent reads this
 log_result.py --name NAME --val_loss X --notes "..."
   ├─ db.log()           → INSERT into experiments, set kept=1 if new best
   ├─ git rev-parse      → attach short hash (best effort)
   └─ context_gen.generate()
        └─ reads DB → writes CONTEXT.md
             ↓
-     Claude Code reads CONTEXT.md at start of next iteration
+    Agent reads CONTEXT.md at start of next iteration
 ```
 
 ---
@@ -104,7 +94,7 @@ log_result.py --name NAME --val_loss X --notes "..."
 | Memory | CONTEXT.md (cross-session) | Human-readable, crash-proof, no vector DB |
 | Dataset | TinyShakespeare (~1MB) | Fast download, no HuggingFace, meaningful in 5 min |
 | Metric | `val_loss` (float) | Direct output; simpler than computing perplexity |
-| Tokenization | Character-level | No tokenizer dependency; simple; karpathy-compatible |
+| Tokenization | Character-level | No tokenizer dependency; simple; |
 | Git integration | Best-effort (subprocess) | Doesn't fail if no git repo; suggested messages only |
 | DB library | stdlib `sqlite3` | Zero dependencies |
 
@@ -112,7 +102,7 @@ log_result.py --name NAME --val_loss X --notes "..."
 
 ## Dashboard
 
-`dashboard.py` replicates karpathy's autoresearch progress chart:
+`dashboard.py` progress chart:
 - **Grey dots**: experiments that didn't improve val_loss
 - **Green dots**: experiments that set a new best
 - **Green step line**: running best over time

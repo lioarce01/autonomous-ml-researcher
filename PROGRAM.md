@@ -84,11 +84,21 @@ the iter gap, scale to per-100-iter rate. Example: iter 750 val=1.493, final (it
 → drop=0.028 over 72 iters → 0.039 per 100 iters → EXTEND (> 0.005 threshold).
 
 **Extension procedure**:
-1. Set `BUDGET_SECONDS = 600` in `train.py`.
-2. Run training: `uv run python train.py`
-3. Log as `[original_name]_ext` with the same notes plus "Extended to 600s — loss still converging."
-4. Restore `BUDGET_SECONDS = 300` in `train.py` after logging.
-5. If `_ext` is kept → it becomes the new base. If not → the original kept result stays as base.
+1. First, pin the WSD decay start to the 5-min iteration count so extending time doesn't
+   defer decay. In `get_lr()`, replace the dynamic `decay_start` with a fixed value:
+   ```python
+   # Before extending: note the iter count from the 5-min run (e.g. 822 iters)
+   decay_start = int(822 * 0.90)  # use actual iter count from original run
+   ```
+   This ensures the model starts decaying at the same point regardless of total budget.
+2. Set `BUDGET_SECONDS = 600` in `train.py`.
+3. Run training: `uv run python train.py`
+4. Log as `[original_name]_ext` with the same notes plus "Extended to 600s — loss still converging."
+5. Restore `BUDGET_SECONDS = 300` and revert `decay_start` to dynamic calculation after logging.
+6. If `_ext` is kept → it becomes the new base. If not → the original kept result stays as base.
+
+**Critical**: Without pinning decay_start, doubling the budget defers the LR decay from ~iter 740
+to ~iter 1500, causing overfitting at full LR. The extension must keep the same decay timing.
 
 **Rules**:
 - Only extend once per config. If the `_ext` run still shows plateau, accept and move on.

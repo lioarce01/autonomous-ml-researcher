@@ -9,12 +9,20 @@ You are an ML research agent running inside Claude Code. Your environment is a d
 **Task**: Character-level language modeling on TinyShakespeare (~1M chars, 65-char vocab).
 **Budget**: 5 minutes wall-clock per experiment (`BUDGET_SECONDS = 300` in `train.py`).
 **Metric**: `val_loss` (cross-entropy, lower is better). Log to 6 decimal places.
-**Baseline model**: ~10.6M parameters (N_EMBD=384, N_HEAD=6, N_LAYER=6, BLOCK_SIZE=256).
-**Val loss scale**:
-- First run (baseline config): ~1.55–1.65
-- Meaningful improvement: ~1.30–1.45
-- Strong result: ~1.15–1.30
-- Exceptional: < 1.15
+**Baseline model**: ~8M parameters (N_EMBD=512, N_HEAD=8, N_LAYER=6, BLOCK_SIZE=256, BATCH_SIZE=64).
+**Val loss scale** (GPU, ~2500+ iters):
+- First run (baseline config): ~1.45–1.55
+- Meaningful improvement: ~1.20–1.40
+- Strong result: ~1.05–1.20
+- Exceptional: < 1.05
+
+**GPU setup (add to top of train.py once, keep across experiments)**:
+```python
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.set_float32_matmul_precision('medium')
+```
+These are free speedup on Blackwell (RTX 5070) — enable them in the baseline run and never remove them.
 
 **Device**: GPU. Always train on GPU — `torch.cuda.is_available()` returns `True`. Models up to ~50M params fit within the 5-min budget.
 
@@ -39,6 +47,7 @@ Repeat forever until `.pause` exists:
    - **Success**: output contains `val_loss: X.XXXXXX` → go to step 8.
    - **Crash / exception**: training did not complete → revert `train.py` to pre-experiment state, log the attempt as a failure (see Error Recovery), go to step 1.
    - **NaN or loss > 10**: training completed but result is degenerate → treat as crash.
+   - **Early abort** (optional): If at the first eval checkpoint (iter 250) val_loss has not dropped at all from the previous experiment's starting loss, or if loss is rising — abort with Ctrl+C, revert train.py, and log as a crash. Do not waste the remaining 4 minutes on a clearly broken config.
 8. **Log the result**: `uv run python log_result.py --name "NAME" --val_loss X.XXXXXX --notes "NOTES"`
 9. **Commit**: run the exact `git commit` command printed by `log_result.py`.
 10. **State management**:
@@ -104,14 +113,43 @@ If `train.py` crashes or produces NaN/degenerate loss:
 ## Failure Streak Protocol
 
 After **3 consecutive non-improvements**:
-- Stop incremental tuning of the same direction.
-- Revert to the current best config (if not already).
-- Pivot: try a qualitatively different approach (different architecture component, different optimizer, different data processing).
+- Stop tuning the same dimension (e.g., stop trying LR variants).
+- Pivot to a different *type* of change:
+  - If last 3 were hyperparameters → try an architecture change
+  - If last 3 were architecture → try optimizer or schedule change
+  - If last 3 were optimizer/schedule → try a Tier 4 combination
 
 After **5 consecutive non-improvements**:
-- Re-read CONTEXT.md carefully.
-- Consider combining previously validated individual improvements.
-- Consider undoing all changes and trying the single highest-impact unexplored idea from the exploration list.
+- Re-read CONTEXT.md. Look at the Unexplored Techniques list.
+- Pick the highest-tier unexplored item and implement it.
+- If all Exploration Guide items are explored → trigger Literature Research.
+
+After **7 consecutive non-improvements**:
+- The current baseline architecture may have hit its ceiling.
+- Consider a full architecture reset: start from a clean config with the single most-validated improvement only, and rebuild from there.
+
+---
+
+## Hypothesis Selection
+
+Before picking the next experiment, apply this decision tree:
+
+1. **Are there Tier 1 techniques in CONTEXT.md "Unexplored" list?**
+   → Yes: pick the first unexplored Tier 1 item. This is always the highest-value move.
+
+2. **Did the last kept experiment involve architecture (not just hyperparameters)?**
+   → Yes: next try a hyperparameter experiment (LR, warmup, batch size) to find the optimal training config for that architecture before adding more complexity.
+   → No: next try an architecture change.
+
+3. **Have you validated >= 3 individual components?**
+   → Yes: consider a Tier 4 combination of the best-performing kept experiments.
+   → No: keep validating individual components.
+
+4. **Is the failure streak >= 3?**
+   → Jump directly to the highest unexplored tier in CONTEXT.md regardless of order.
+   → If all tiers explored: trigger Literature Research.
+
+**Key principle**: Alternate between architecture changes and hyperparameter sweeps. Never run two architecture changes back-to-back without re-optimizing LR in between — the optimal LR shifts when architecture changes.
 
 ---
 
@@ -136,6 +174,16 @@ You **may** create new files (e.g., helper modules imported by `train.py`) but k
 ## Exploration Guide
 
 Roughly ordered by expected impact on a small character-level model. Work top-to-bottom, skipping anything already tried.
+
+### Tier 0 — Free GPU Speedups (add once, never remove)
+
+These go in train.py once during the baseline run. They are not experiments — they are setup. Add them after the `device` line:
+
+```python
+torch.backends.cuda.matmul.allow_tf32 = True   # enables TF32 on matmuls
+torch.backends.cudnn.allow_tf32 = True
+torch.set_float32_matmul_precision('medium')
+```
 
 ### Tier 1 — High Impact (try these first)
 
@@ -163,6 +211,17 @@ class RMSNorm(nn.Module):
         return x / x.norm(2, dim=-1, keepdim=True) * (x.shape[-1] ** 0.5) * self.g
 ```
 
+**torch.compile**
+Add `model = torch.compile(model)` after `model.to(device)`. PyTorch 2.x traces the computation graph and fuses ops. First iteration is slow (tracing); subsequent iters are 10-20% faster. Use `mode='reduce-overhead'` for small models.
+Constraint: adds ~30s overhead on first iter — account for this in budget.
+
+**Logit Soft-Capping**
+In `GPT.forward()`, before computing loss, clamp logits:
+```python
+logits = 30.0 * torch.tanh(logits / 30.0)
+```
+This bounds logits to [-30, 30] via a smooth taper. Prevents attention entropy collapse and training instability at higher LRs. Adopted by Gemma 2. Allows training at 1.5-2x higher LR than without capping. Try cap values: 30, 50.
+
 ### Tier 2 — Medium Impact
 
 **Depth vs Width tradeoff**
@@ -175,6 +234,39 @@ Constraint: `N_EMBD // N_HEAD` must be even.
 **Grouped-Query Attention (GQA)**
 Reduce KV heads to `N_HEAD // 2` or `N_HEAD // 3`. Saves memory, sometimes better generalization.
 Constraint: `n_kv_heads` must divide `N_HEAD`.
+
+**WSD (Warmup-Stable-Decay) Schedule**
+Replace the current cosine schedule in `get_lr()` with three phases:
+- Warmup: 0 → LEARNING_RATE over WARMUP_ITERS
+- Stable: hold at LEARNING_RATE for ~80% of budget
+- Decay: LEARNING_RATE → MIN_LR over final ~10% of budget
+
+```python
+def get_lr(it, max_iters):
+    warmup_end = WARMUP_ITERS
+    decay_start = int(max_iters * 0.90)
+    if it < warmup_end:
+        return LEARNING_RATE * it / warmup_end
+    if it < decay_start:
+        return LEARNING_RATE
+    decay_ratio = (it - decay_start) / (max_iters - decay_start)
+    return MIN_LR + (LEARNING_RATE - MIN_LR) * (1 - decay_ratio)
+```
+Proven to beat cosine decay; adopted by DeepSeek-V3, ERNIE 4.5. Loss drops noticeably in the decay phase even after a flat stable phase — don't abort early.
+
+**ReLU² activation**
+Replace `F.silu` in the SwiGLU MLP with squared ReLU: `F.relu(x).pow(2)`.
+Simple change, measurably faster convergence than GELU or SiLU. Only test after SwiGLU is validated — swap just the activation function inside the gate.
+
+**Muon optimizer**
+Apply orthogonalized momentum to all 2D weight matrices (attention + MLP weights). Keep AdamW for 1D params (norms, embeddings, biases).
+```python
+# muon.py -- create this file, import in train.py
+# Reference: https://github.com/KellerJordan/Muon
+```
+Use `N_STEPS_NEWTON_SCHULZ = 5`. Achieves same val_loss as AdamW in ~52% of the FLOPs (1.35x wall-clock speedup on small transformers). Overhead: ~0.7% per step.
+Requires creating `muon.py` as a helper file.
+Source: Liu et al. 2025 arxiv:2502.16982
 
 **Warmup + cosine schedule tuning**
 Try `WARMUP_ITERS=200` or `500`. Try `MIN_LR = LEARNING_RATE / 10` (already set) vs `MIN_LR = 0`.
@@ -205,13 +297,20 @@ Current: `GRAD_CLIP=1.0`. Try `0.5` (tighter) or `5.0` (looser).
 **Pre-norm vs Post-norm**
 Current: pre-norm (LN before attention/MLP). Try post-norm (LN after residual add). Pre-norm is usually better but worth testing.
 
-### Tier 4 — Combination Experiments (after validating components)
+### Tier 4 — Combination Experiments
 
-Only attempt these after each component has been individually validated:
-- Flash Attention + SwiGLU
-- RoPE + RMSNorm
-- Best LR + best architecture change
-- All validated improvements combined (final config)
+Attempt only after each component is in the CONTEXT.md leaderboard with kept=YES. Order by proven synergy:
+
+**Bundle A — Modern architecture stack** (try together as one experiment):
+RoPE + RMSNorm + SwiGLU. These three are designed to work together and have interacting benefits (RMSNorm stabilizes RoPE dot-products; SwiGLU plays well with pre-norm). Testing them together is valid if each was individually validated.
+
+**Bundle B — Optimizer + schedule**:
+Muon + WSD schedule. The WSD stable phase benefits from Muon's orthogonalization.
+
+**Bundle C — Stability stack**:
+Logit soft-capping + higher LR. If capping was validated, try pushing LR up (e.g., 2x the best LR found so far) as capping allows it.
+
+**Final config**: All validated components from A + B + C combined.
 
 ---
 
@@ -225,7 +324,7 @@ Run a literature search in the same three cases as step 1.5:
 
 ### How to search
 
-Claude Code has `WebSearch` and `WebFetch` tools. Use them like this:
+This agent has `WebSearch` and `WebFetch` tools. Use them like this:
 
 ```
 WebSearch: "arxiv [technique] transformer language model 2024 2025"
@@ -293,6 +392,6 @@ After running, `log_result.py` will:
 
 If `CONTEXT.md` does not exist, this is your first run:
 1. `uv run python train.py` — run the default config (~5 min)
-2. `uv run python log_result.py --name "baseline" --val_loss X.XXXXXX --notes "Default nanoGPT config. N_LAYER=6, N_EMBD=384, N_HEAD=6, LR=1e-3."`
+2. `uv run python log_result.py --name "baseline" --val_loss X.XXXXXX --notes "Default config. N_LAYER=6, N_EMBD=512, N_HEAD=8, BATCH_SIZE=64, LR=1e-3."`
 3. Run the suggested git commit.
 4. Begin the research loop from step 1.
